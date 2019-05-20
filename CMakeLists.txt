@@ -2,7 +2,8 @@ cmake_minimum_required(VERSION 3.10)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_COMPILER g++)
-FIND_PACKAGE( Boost 1.40 COMPONENTS program_options REQUIRED )
+set(CMAKE_CXX_FLAGS "-Wall -Wextra")
+FIND_PACKAGE( Boost 1.40 COMPONENTS program_options filesystem REQUIRED )
 INCLUDE_DIRECTORIES( ${Boost_INCLUDE_DIR} )
 
 ADD_EXECUTABLE( netstore-client main.cpp shared_structs.h err.h err.cpp)

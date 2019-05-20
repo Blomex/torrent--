@@ -1,6 +1,7 @@
 #include <iostream>
 #include <sstream>
 #include <boost/program_options.hpp>
+#include <boost/filesystem.hpp>
 #include <fstream>
 #include "shared_structs.h"
 #include <sys/types.h>
@@ -23,44 +24,58 @@ using std::cout;
 using std::cin;
 using std::getline;
 
-const string HELLO = "HELLO00000";
-const string GOOD_DAY = "GOOD_DAY00";
-const string LIST = "LIST000000";
-const string MY_LIST = "MY_LIST000";
+const string HELLO = "HELLO";
+const string GOOD_DAY = "GOOD_DAY";
+const string LIST = "LIST";
+const string MY_LIST = "MY_LIST";
 const string CONNECT_ME = "CONNECT_ME";
-const string DEL = "DEL0000000";
-const string ADD = "ADD0000000";
+const string DEL = "DEL";
+const string ADD = "ADD";
 uint64_t cmd_seq = 1;
 
-void string_to_char_with_zeros(char cmd[10], string &s){
-    int n = s.length();
-    for(int i=0; i<n; i++){
-        cmd[i] = s[i];
-    }
-    for(int i = n; i <10; i++){
-        cmd[i] = '\0';
-    }
-}
-void prepare_to_send(SIMPL_CMD &packet, char cmd[10], char data[]){
-    for(int i = 0; i < 10; i++){
-        packet.cmd[i] = cmd[i];
-    }
-    packet.data = data;
-    packet.cmd_seq = cmd_seq;
 
-}
-void prepare_to_send_param(CMPLX_CMD &packet, uint64_t param, char cmd[10], char data[]){
+
+int prepare_to_send(SIMPL_CMD &packet, char cmd[10], const string &data){
     for(int i = 0; i < 10; i++){
         packet.cmd[i] = cmd[i];
     }
-    packet.data = data;
+    int pom = sizeof(packet.data);
+    strncpy(packet.data, data.c_str(), sizeof(packet.data));
+
     packet.cmd_seq = cmd_seq;
+    int i = data.length() + sizeof(packet.cmd_seq) + sizeof(packet.cmd);
+    return data.length() + sizeof(packet.cmd_seq) + sizeof(packet.cmd);
+}
+int prepare_to_send_param(CMPLX_CMD &packet, uint64_t param, char cmd[10], string &data){
+    //TODO strncpy instead?
+    for(int i = 0; i < 10; i++){
+        packet.cmd[i] = cmd[i];
+    }
+    int pom = sizeof(packet.data);
+    strncpy(packet.data, data.c_str(), sizeof(packet.data));
+    packet.cmd_seq = cmd_seq;
+    return data.length() + sizeof(packet.cmd_seq) + sizeof(packet.cmd) + sizeof(packet.param);
 }
 
 void on_timeout(int timeout){
     if(timeout> 300 || timeout <= 0){
         throw std::invalid_argument("Timeout value specified by -t or --TIMEOUT must be between 1 and 300");
     }
+}
+
+void perform_search(const string &s){
+    char cmd[10];
+    set_cmd(cmd, LIST);
+    SIMPL_CMD packet;
+
+    int length = prepare_to_send(packet, cmd, s);
+    if (write(sock, ))
+}
+void perform_discover(){
+    char cmd[10];
+    set_cmd(cmd, HELLO);
+    SIMPL_CMD packet;
+    prepare_to_send(packet, cmd, "");
 }
 int main(int argc, const char *argv[]) {
     uint16_t port;
@@ -106,20 +121,20 @@ int main(int argc, const char *argv[]) {
     struct sockaddr_in client_address[N];
     socklen_t client_address_len[N];
     struct sockaddr_in localSock;
+    struct sockaddr_in remote_address;
     struct pollfd fds[N];
 
-    //initializing pollin
-    for(int i=0; i<N; i++){
-        fds[i].fd = -1;
-        fds[i].events = POLLIN;
-        fds[i].revents = 0;
-    }
 
     //new connections on fds[0]
-    fds[0].fd = socket(PF_INET, SOCK_DGRAM, 0); // creating IPv4 UDP socket
-    if (fds[0].fd < 0)
+    int sock = socket(PF_INET, SOCK_DGRAM, 0); // creating IPv4 UDP socket
+    if(sock < 0){
         syserr("socket");
-    int sock = fds[0].fd;
+    }
+
+    //activate bcast
+    int optval = 1;
+    if (setsockopt(sock, SOL_SOCKET, SO_BROADCAST, (void*)&optval, sizeof optval) < 0)
+        syserr("setsockopt broadcast");
 
 /* Enable SO_REUSEADDR to allow multiple instances of this */
 /* application to receive copies of the multicast datagrams. */
@@ -131,20 +146,21 @@ int main(int argc, const char *argv[]) {
     //binding port number with ip address
     memset((char *) &localSock, 0, sizeof(localSock));
     localSock.sin_addr.s_addr = htonl(INADDR_ANY); // listening on all interfaces
-    localSock.sin_port = htons(port); // listening on port PORT_NUM
+    localSock.sin_port = htons(0); // listening on port PORT_NUM
     localSock.sin_family = AF_INET; // IPv4
 
     if(bind(sock, (struct sockaddr*)&localSock, sizeof(localSock)) < 0){
         syserr("bind");
     }
 
-    //join to group
-    group.imr_interface.s_addr = htonl(INADDR_ANY);
-    if (inet_aton(addr.c_str(), &group.imr_multiaddr) == 0)
-        syserr("inet_aton");
-    if (setsockopt(sock, IPPROTO_IP, IP_ADD_MEMBERSHIP, (void*)&group, sizeof group) < 0)
-        syserr("setsockopt");
 
+    /* ustawienie adresu i portu odbiorcy */
+    remote_address.sin_family = AF_INET;
+    remote_address.sin_port = htons(port);
+    if (inet_aton(addr.c_str(), &remote_address.sin_addr) == 0)
+        syserr("inet_aton");
+    if (connect(sock, (struct sockaddr *)&remote_address, sizeof remote_address) < 0)
+        syserr("connect");
 
 
     while(getline(cin, line)){
@@ -161,30 +177,37 @@ int main(int argc, const char *argv[]) {
             if(a == "discover"){
                 //TODO discover
                 cout << a;
-
+                perform_discover();
                 char buffer[256];
                 ssize_t rcv_len;
+                SIMPL_CMD simpl_cmd;
+                set_cmd(simpl_cmd.cmd,  HELLO);
+                int length = 10;
+                    if (write(sock, &simpl_cmd, length) != length)
+                        syserr("write");
                 /* czytanie tego, co odebrano */
+                /*
+                struct sockaddr_in src_addr;
+                socklen_t addrlen = sizeof(struct sockaddr_in);
                 for (int i = 0; i < 30; ++i) {
-                    rcv_len = read(sock, buffer, sizeof buffer);
+                    rcv_len = recvfrom(sock, buffer, sizeof buffer, 0, (struct sockaddr*)&src_addr, &addrlen);
                     if (rcv_len < 0)
                         syserr("read");
                     else {
+                        printf("Server IP: %s\n", inet_ntoa(src_addr.sin_addr));
                         printf("read %zd bytes: %.*s\n", rcv_len, (int)rcv_len, buffer);
                     }
                 }
-
-
-
-
+                */
             }
             else if(a == "exit"){
-                //TODO exit
                 exit(0);
             }
             else if(a == "search"){
                 //TODO search
                 cout <<"performing search..\n";
+                string s = "";
+                perform_search(s);
             }
             else{
                 cout << a << " is unrecognized command or requires parameter\n";
@@ -196,6 +219,7 @@ int main(int argc, const char *argv[]) {
             }
             else if(a == "search"){
                 //TODO search with argument
+                perform_search(b);
             }
             else if(a == "upload"){
                 //TODO upload
