@@ -27,6 +27,7 @@ using std::string;
 using std::cout;
 using std::vector;
 using std::cin;
+using std::string;
 using std::getline;
 #define BSIZE         256
 #define TTL_VALUE     4
@@ -74,7 +75,47 @@ vector<fs::path> check_all_files_for_pattern(vector <fs::path> files, string &pa
     return filenames;
 }
 
-send_file_list_packet(int sock, struct sockaddr_in dest, string &s)
+void send_file_list_packet(int sock, struct sockaddr_in dest, string &s, SIMPL_CMD &received, vector<fs::path> files){
+    SIMPL_CMD packet;
+    set_cmd(packet.cmd, "MY_LIST");
+    packet.cmd_seq = received.cmd_seq;
+    int data_counter = 0;
+    int delimiter_counter = -1;
+    vector<string> names;
+    for(auto &f: files) {
+        if (f.filename().string().find(s) != string::npos) {
+            if (data_counter + delimiter_counter + f.filename().string().length() > MAX_DATA_SIZE) {
+                strcpy(packet.data, boost::join(names, "\n").c_str());
+                if (sendto(sock,
+                           &packet,
+                           (size_t) 18 + data_counter + delimiter_counter,
+                           0,
+                           (struct sockaddr *) &dest,
+                           sizeof(dest)) != data_counter + 18) {
+                    syserr("sendto");
+                }
+                data_counter = 0;
+                delimiter_counter = -1;
+                names = vector<string>();
+            }
+            names.push_back(f.filename().string());
+            delimiter_counter++;
+            data_counter += f.filename().string().length();
+        }
+        strcpy(packet.data, boost::join(names, "\n").c_str());
+        if (data_counter > 0) {
+            if (sendto(sock,
+                       &packet,
+                       (size_t) 18 + data_counter + delimiter_counter,
+                       0,
+                       (struct sockaddr *) &dest,
+                       sizeof(dest)) != data_counter + 18) {
+                syserr("sendto");
+            }
+        }
+    }
+
+}
 
 int main(int argc, const char *argv[]) {
     struct sockaddr_in src_addr;
@@ -237,7 +278,7 @@ int main(int argc, const char *argv[]) {
           else if(strncmp(simple_cmd.cmd, "LIST", 4) == 0){
               cout << "Search..";
               simple_cmd.data[recv_len-18] = '\0';
-              send_file_list_packet(sock, remote_address, simple_cmd.data);
+              send_file_list_packet(sock, src_addr, simple_cmd.data);
           }
           else{
           }
