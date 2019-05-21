@@ -31,6 +31,7 @@ const string MY_LIST = "MY_LIST";
 const string CONNECT_ME = "CONNECT_ME";
 const string DEL = "DEL";
 const string ADD = "ADD";
+const string GET = "GET";
 uint64_t cmd_seq = 1;
 
 
@@ -63,19 +64,29 @@ void on_timeout(int timeout){
     }
 }
 
-void perform_search(const string &s){
+void perform_search(const string &s, int sock){
     char cmd[10];
     set_cmd(cmd, LIST);
     SIMPL_CMD packet;
 
     int length = prepare_to_send(packet, cmd, s);
-    if (write(sock, ))
+    //if (write(sock, ))
 }
-void perform_discover(){
+void perform_discover(int sock){
     char cmd[10];
     set_cmd(cmd, HELLO);
     SIMPL_CMD packet;
-    prepare_to_send(packet, cmd, "");
+    int length = prepare_to_send(packet, cmd, "");
+    if (write(sock, &packet, length) != length)
+      syserr("write");
+}
+void perform_fetch(string &s, int sock){
+  char cmd[10];
+  set_cmd(cmd, GET);
+  SIMPL_CMD packet;
+  int length = prepare_to_send(packet, cmd, s);
+  if (write(sock, &packet, length) != length)
+    syserr("write");
 }
 int main(int argc, const char *argv[]) {
     uint16_t port;
@@ -177,14 +188,7 @@ int main(int argc, const char *argv[]) {
             if(a == "discover"){
                 //TODO discover
                 cout << a;
-                perform_discover();
-                char buffer[256];
-                ssize_t rcv_len;
-                SIMPL_CMD simpl_cmd;
-                set_cmd(simpl_cmd.cmd,  HELLO);
-                int length = 10;
-                    if (write(sock, &simpl_cmd, length) != length)
-                        syserr("write");
+                perform_discover(sock);
                 /* czytanie tego, co odebrano */
                 /*
                 struct sockaddr_in src_addr;
@@ -207,19 +211,24 @@ int main(int argc, const char *argv[]) {
                 //TODO search
                 cout <<"performing search..\n";
                 string s = "";
-                perform_search(s);
+                perform_search(s, sock);
             }
             else{
                 cout << a << " is unrecognized command or requires parameter\n";
             }
         }
         else{
+          string c;
+          while(iss >> c){
+            b+=" "+c;
+          }
             if(a == "fetch"){
                 //TODO fetch
+                perform_fetch(b, sock);
             }
             else if(a == "search"){
                 //TODO search with argument
-                perform_search(b);
+                perform_search(b, sock);
             }
             else if(a == "upload"){
                 //TODO upload

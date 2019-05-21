@@ -104,12 +104,18 @@ int main(int argc, const char *argv[]) {
     std::vector<fs::path> Files;
     cout <<"Indexing files in "<<fs::directory_entry(disc_folder) << " ...\n";
     int spaceTaken = 0;
-    for(auto &p: fs::directory_iterator(disc_folder)){
-        if(fs::is_regular(p)){
-            cout << "size of: " << p.path().filename() <<" is "<<fs::file_size(p) << "\n";
-            spaceTaken += fs::file_size(p);
-            Files.push_back(p.path());
+    try {
+        for (auto &p: fs::directory_iterator(disc_folder)) {
+            if (fs::is_regular(p)) {
+                cout << "size of: " << p.path().filename() << " is " << fs::file_size(p) << "\n";
+                spaceTaken += fs::file_size(p);
+                Files.push_back(p.path());
+            }
         }
+    }
+    catch(fs::filesystem_error &err){
+        cout <<"Exception thrown: "<< err.what() << "\n";
+        cout <<"Closing the server";
     }
     cout << "Indexing complete, total size: " << spaceTaken << "\n";
     cout << "Free size left: " << space - spaceTaken << "\n";
@@ -204,11 +210,21 @@ int main(int argc, const char *argv[]) {
       poll(fds, MAX_POOL, -1);
       if(fds[0].fd & POLLIN){
           cout << "GG, pollin works! Poggers\n";
-          ssize_t recv_len = recvfrom(sock, (char *) &simple_cmd, 10, 0, (struct sockaddr *) &src_addr, &len);
+          ssize_t recv_len = recvfrom(sock, (char *) &simple_cmd, sizeof simple_cmd, 0, (struct sockaddr *) &src_addr, &len);
           cout << "say hi\n";
+          int i = recv_len;
+          printf("received : %d\n", i);
           if (strncmp(simple_cmd.cmd, "HELLO", 5) == 0) {
               cout << "WE GOT HELLO, WOAH\n";
               CMPLX_CMD *abc = (CMPLX_CMD *) &simple_cmd;
+          }
+          else{
+              string s(simple_cmd.data);
+              string data_recv = string(simple_cmd.data);
+              if(data_recv.find("AAAAA") != string::npos){
+                printf("WOW");
+              }
+              printf("xd : %s\n", simple_cmd.data);
           }
       }
       for(int i=1; i < MAX_POOL; i++){
