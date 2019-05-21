@@ -7,13 +7,13 @@
 #include <cstdint>
 #include <string>
 #define MAX_DATA_SIZE 65489
-typedef struct{
+typedef struct __attribute__((__packed__)){
     char cmd[10];
     uint64_t cmd_seq;
     char data[MAX_DATA_SIZE];
 }SIMPL_CMD;
 
-typedef struct{
+typedef struct __attribute__((__packed__)){
     char cmd[10];
     uint64_t cmd_seq;
     uint64_t param;

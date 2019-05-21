@@ -14,6 +14,7 @@
 #include <poll.h>
 #include "err.h"
 #include <boost/algorithm/string.hpp>
+#include <chrono>
 #define N 100
 #define BUFFER_SIZE   2000
 #define QUEUE_LENGTH     5
@@ -23,7 +24,8 @@ using std::string;
 using std::cout;
 using std::cin;
 using std::getline;
-
+using std::vector;
+using namespace std::chrono;
 const string HELLO = "HELLO";
 const string GOOD_DAY = "GOOD_DAY";
 const string LIST = "LIST";
@@ -33,8 +35,7 @@ const string DEL = "DEL";
 const string ADD = "ADD";
 const string GET = "GET";
 uint64_t cmd_seq = 1;
-
-
+int timeout;
 
 int prepare_to_send(SIMPL_CMD &packet, char cmd[10], const string &data){
     for(int i = 0; i < 10; i++){
@@ -43,11 +44,11 @@ int prepare_to_send(SIMPL_CMD &packet, char cmd[10], const string &data){
     int pom = sizeof(packet.data);
     strncpy(packet.data, data.c_str(), sizeof(packet.data));
 
-    packet.cmd_seq = cmd_seq;
+    packet.cmd_seq = htobe64(cmd_seq);
     int i = data.length() + sizeof(packet.cmd_seq) + sizeof(packet.cmd);
     return data.length() + sizeof(packet.cmd_seq) + sizeof(packet.cmd);
 }
-int prepare_to_send_param(CMPLX_CMD &packet, uint64_t param, char cmd[10], string &data){
+int prepare_to_send_param(CMPLX_CMD &packet, uint64_t param, char cmd[10], const string &data){
     //TODO strncpy instead?
     for(int i = 0; i < 10; i++){
         packet.cmd[i] = cmd[i];
@@ -64,33 +65,102 @@ void on_timeout(int timeout){
     }
 }
 
-void perform_search(const string &s, int sock){
+void perform_search(const string &s, int sock, struct sockaddr_in &remote_address){
     char cmd[10];
     set_cmd(cmd, LIST);
     SIMPL_CMD packet;
 
     int length = prepare_to_send(packet, cmd, s);
-    //if (write(sock, ))
+    if (sendto(sock, &packet, length, 0, (struct sockaddr*)&remote_address, sizeof remote_address) != length)
+        syserr("write");
+    CMPLX_CMD p3;
+    struct sockaddr_in server;
+    socklen_t len = sizeof(struct sockaddr_in);
+    auto start = high_resolution_clock::now();
+
+    while(1) {
+        //TODO do poprawy
+        auto end = high_resolution_clock::now();
+        duration<double, std::milli> elapsed = end - start;
+        if (elapsed.count() >= timeout * 1000) {
+            break;
+        }
+        int x = recvfrom(sock, &p3, sizeof p3, 0, (struct sockaddr *) &server, &len);
+        if (x < 0) {
+            continue;
+        }
+        p3.data[x - 26] = '\0';
+        //check if we got packet we are expecting
+        int port = ntohs(server.sin_port);
+        string ip = inet_ntoa(server.sin_addr);
+        if (strncmp(p3.cmd, "MY_LIST", 8) == 0 && be64toh(p3.cmd_seq)==cmd_seq) {
+            vector<string> result;
+            boost::split(result, p3.data, boost::is_any_of("\n"));
+            for(string &str : result){
+                cout << str <<" ("<<ip<<")\n";
+            }
+        }
+        else{
+            cout <<"[PCKG ERROR]  Skipping invalid package from "<<ip<<":"<<port<<".\n";
+        }
+    }
+
+
 }
-void perform_discover(int sock){
-    char cmd[10];
-    set_cmd(cmd, HELLO);
-    SIMPL_CMD packet;
-    int length = prepare_to_send(packet, cmd, "");
-    if (write(sock, &packet, length) != length)
-      syserr("write");
-}
-void perform_fetch(string &s, int sock){
+
+void perform_fetch(string &s, int sock, struct sockaddr_in &remote_address){
   char cmd[10];
   set_cmd(cmd, GET);
   SIMPL_CMD packet;
   int length = prepare_to_send(packet, cmd, s);
-  if (write(sock, &packet, length) != length)
-    syserr("write");
+    if (sendto(sock, &packet, length, 0, (struct sockaddr*)&remote_address, sizeof remote_address) != length)
+        syserr("sendto");
+
 }
+
+void perform_discover(int sock, struct sockaddr_in &remote_address){
+    char cmd[10];
+    set_cmd(cmd, HELLO);
+    SIMPL_CMD packet;
+    int length = prepare_to_send(packet, cmd, "");
+
+    if (sendto(sock, &packet, length, 0, (struct sockaddr*)&remote_address, sizeof remote_address) != length)
+        syserr("sendto");
+    CMPLX_CMD p3;
+    struct sockaddr_in server;
+    socklen_t len = sizeof(struct sockaddr_in);
+    auto start = high_resolution_clock::now();
+    while(1) {
+        //TODO do poprawy
+        auto end = high_resolution_clock::now();
+        duration<double, std::milli> elapsed = end - start;
+        if(elapsed.count()>=timeout*1000){
+            break;
+        }
+        int x = recvfrom(sock, &p3, sizeof p3, 0, (struct sockaddr *) &server, &len);
+        if (x < 0) {
+            continue;
+        }
+        p3.data[x - 26] = '\0';
+        //check if we got packet we are expecting
+        int port = ntohs(server.sin_port);
+        string ip = inet_ntoa(server.sin_addr);
+        if(strncmp(p3.cmd, "MY_LIST", 7) == 0 && be64toh(p3.cmd_seq)==cmd_seq){
+            cout << "Found "<<ip << " ("<<p3.data <<") with free space "<<be64toh(p3.param)<<"\n";
+        }
+        else{
+            cout <<"[PCKG ERROR]  Skipping invalid package from "<<ip<<":"<<port<<".\n";
+        }
+    }
+
+}
+
+
 int main(int argc, const char *argv[]) {
+    struct timeval s_timeout;
+    s_timeout.tv_usec = 10;
+    s_timeout.tv_sec = 0;
     uint16_t port;
-    int timeout;
     string addr, savedir;
     struct ip_mreq group;
     try{
@@ -115,7 +185,6 @@ int main(int argc, const char *argv[]) {
 
     string command;
     string param;
-
     //TODO debug stuff
     cout << addr << "\n";
     cout << " port " << port << "\n";
@@ -142,6 +211,12 @@ int main(int argc, const char *argv[]) {
         syserr("socket");
     }
 
+    //set timeout
+    if (setsockopt (sock, SOL_SOCKET, SO_RCVTIMEO, (char *)&s_timeout, sizeof(s_timeout)) < 0) {
+        error("setsockopt rcvtimeout\n");
+        close(sock);
+        exit(1);
+    }
     //activate bcast
     int optval = 1;
     if (setsockopt(sock, SOL_SOCKET, SO_BROADCAST, (void*)&optval, sizeof optval) < 0)
@@ -166,13 +241,13 @@ int main(int argc, const char *argv[]) {
 
 
     /* ustawienie adresu i portu odbiorcy */
+
     remote_address.sin_family = AF_INET;
     remote_address.sin_port = htons(port);
     if (inet_aton(addr.c_str(), &remote_address.sin_addr) == 0)
         syserr("inet_aton");
-    if (connect(sock, (struct sockaddr *)&remote_address, sizeof remote_address) < 0)
-        syserr("connect");
-
+   /* if (connect(sock, (struct sockaddr *)&remote_address, sizeof remote_address) < 0)
+        syserr("connect");*/
 
     while(getline(cin, line)){
         string a, b;
@@ -188,21 +263,7 @@ int main(int argc, const char *argv[]) {
             if(a == "discover"){
                 //TODO discover
                 cout << a;
-                perform_discover(sock);
-                /* czytanie tego, co odebrano */
-                /*
-                struct sockaddr_in src_addr;
-                socklen_t addrlen = sizeof(struct sockaddr_in);
-                for (int i = 0; i < 30; ++i) {
-                    rcv_len = recvfrom(sock, buffer, sizeof buffer, 0, (struct sockaddr*)&src_addr, &addrlen);
-                    if (rcv_len < 0)
-                        syserr("read");
-                    else {
-                        printf("Server IP: %s\n", inet_ntoa(src_addr.sin_addr));
-                        printf("read %zd bytes: %.*s\n", rcv_len, (int)rcv_len, buffer);
-                    }
-                }
-                */
+                perform_discover(sock, remote_address);
             }
             else if(a == "exit"){
                 exit(0);
@@ -211,7 +272,7 @@ int main(int argc, const char *argv[]) {
                 //TODO search
                 cout <<"performing search..\n";
                 string s = "";
-                perform_search(s, sock);
+                perform_search(s, sock, remote_address);
             }
             else{
                 cout << a << " is unrecognized command or requires parameter\n";
@@ -224,11 +285,11 @@ int main(int argc, const char *argv[]) {
           }
             if(a == "fetch"){
                 //TODO fetch
-                perform_fetch(b, sock);
+                perform_fetch(b, sock, remote_address);
             }
             else if(a == "search"){
                 //TODO search with argument
-                perform_search(b, sock);
+                perform_search(b, sock, remote_address);
             }
             else if(a == "upload"){
                 //TODO upload

@@ -33,6 +33,7 @@ using std::getline;
 #define REPEAT_COUNT  8
 #define SLEEP_TIME    1
 #define MAX_POOL 128
+
 void on_timeout(int timeout){
     if(timeout> 300 || timeout <= 0){
         throw std::invalid_argument("Timeout value specified by -t or --TIMEOUT must be between 1 and 300");
@@ -72,11 +73,16 @@ vector<fs::path> check_all_files_for_pattern(vector <fs::path> files, string &pa
     }
     return filenames;
 }
+
+send_file_list_packet(int sock, struct sockaddr_in dest, string &s)
+
 int main(int argc, const char *argv[]) {
     struct sockaddr_in src_addr;
+    struct timeval timeout;
+    timeout.tv_usec = 0;
+
     SIMPL_CMD simple_cmd;
     uint16_t port;
-    int timeout;
     uint64_t space;
     string addr, disc_folder;
     struct ip_mreq group;
@@ -87,7 +93,7 @@ int main(int argc, const char *argv[]) {
             ("CMD_PORT,p", value<uint16_t>(&port)->required(), "port")
             ("MAX_SPACE,b", value<uint64_t>(&space)->default_value(52428800), "max_space")
             ("SHRD_FLDR,f", value<string>(&disc_folder)->required(), "disc folder")
-            ("TIMEOUT,t", value<int>(&timeout)->default_value(5)->notifier(on_timeout), "timeout");
+            ("TIMEOUT,t", value<time_t>(&(timeout.tv_sec))->default_value(5)->notifier(on_timeout), "timeout");
         variables_map vm;
         store(parse_command_line(argc, argv, desc), vm);
         notify(vm);
@@ -118,7 +124,8 @@ int main(int argc, const char *argv[]) {
         cout <<"Closing the server";
     }
     cout << "Indexing complete, total size: " << spaceTaken << "\n";
-    cout << "Free size left: " << space - spaceTaken << "\n";
+    cout << "Free size left: ";
+    cout << space - spaceTaken << "\n";
     string str = "CMAKE_BINARY_DIR = /mnt/c/Users/Beniamin/CLionProjects/untitled21/cmake-build-debug\n";
    // vector<fs::path> nowy = check_all_files_for_pattern(Files, str);
     /*for(auto &a : nowy){
@@ -134,7 +141,6 @@ int main(int argc, const char *argv[]) {
     socklen_t len = sizeof(struct sockaddr_in);
     size_t length;
     time_t time_buffer;
-    int i;
     char buffer[BSIZE];
 
     /*inicjacja pooli*/
@@ -155,25 +161,35 @@ int main(int argc, const char *argv[]) {
     /*reuse addr*/
     {
         int reuse=1;
-
-        if (setsockopt(sock, SOL_SOCKET, SO_REUSEADDR,
-                       (char *)&reuse, sizeof(reuse)) < 0) {
+        if (setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, (char *)&reuse, sizeof(reuse)) < 0) {
             perror("setting SO_REUSEADDR");
             close(sock);
             exit(1);
         }
     }
 
+
+/* podpięcie się pod lokalny adres i port */
+    local_address.sin_family = AF_INET;
+    local_address.sin_addr.s_addr = htonl(INADDR_ANY);
+    local_address.sin_port = htons(port);
+    if (bind(sock, (struct sockaddr *)&local_address, sizeof local_address) < 0) {
+        syserr("bind");
+    }
+
     /* podpięcie się do grupy rozsyłania (ang. multicast) */
     group.imr_interface.s_addr = htonl(INADDR_ANY);
     if (inet_aton(addr.c_str(), &group.imr_multiaddr) == 0)
         syserr("inet_aton");
+
     if (setsockopt(sock, IPPROTO_IP, IP_ADD_MEMBERSHIP, (void*)&group, sizeof group) < 0)
         syserr("setsockopt");
+
+
     /* uaktywnienie rozgłaszania (ang. broadcast) */
     optval = 1;
-//    if (setsockopt(sock, SOL_SOCKET, SO_BROADCAST, (void*)&optval, sizeof optval) < 0)
-//        syserr("setsockopt broadcast");
+    if (setsockopt(sock, SOL_SOCKET, SO_BROADCAST, (void*)&optval, sizeof optval) < 0)
+        syserr("setsockopt broadcast");
 
     /* ustawienie TTL dla datagramów rozsyłanych do grupy */
 //    optval = TTL_VALUE;
@@ -185,46 +201,45 @@ int main(int argc, const char *argv[]) {
 //    if (setsockopt(sock, SOL_IP, IP_MULTICAST_LOOP, (void*)&optval, sizeof optval) < 0)
 //      syserr("setsockopt loop");
 
-    /* podpięcie się pod lokalny adres i port */
-  local_address.sin_family = AF_INET;
-  local_address.sin_addr.s_addr = htonl(INADDR_ANY);
-  local_address.sin_port = htons(port);
-  if (bind(sock, (struct sockaddr *)&local_address, sizeof local_address) < 0) {
-      syserr("bind");
-  }
   fds[0].fd = sock;
-
-
-  /* ustawienie adresu i portu odbiorcy */
-//  remote_address.sin_family = AF_INET;
-//  remote_address.sin_port = htons(port);
-//  if (inet_aton(addr.c_str(), &remote_address.sin_addr) == 0)
-//      syserr("inet_aton");
-//  if (connect(sock, (struct sockaddr *)&remote_address, sizeof remote_address) < 0)
-//      syserr("connect");
-
 
   /*czytanie wszystkiego z socketu UDP*/
   bool xd = true;
   do {
       poll(fds, MAX_POOL, -1);
-      if(fds[0].fd & POLLIN){
+          if(fds[0].fd & POLLIN){
+          CMPLX_CMD *abc;
+          simple_cmd.cmd_seq = 6666;
           cout << "GG, pollin works! Poggers\n";
-          ssize_t recv_len = recvfrom(sock, (char *) &simple_cmd, sizeof simple_cmd, 0, (struct sockaddr *) &src_addr, &len);
+          memset(&src_addr, 0, sizeof(src_addr));
+          ssize_t recv_len = recvfrom(sock, &simple_cmd, sizeof simple_cmd, 0, (struct sockaddr *) &src_addr, &len);
+
           cout << "say hi\n";
           int i = recv_len;
           printf("received : %d\n", i);
           if (strncmp(simple_cmd.cmd, "HELLO", 5) == 0) {
               cout << "WE GOT HELLO, WOAH\n";
-              CMPLX_CMD *abc = (CMPLX_CMD *) &simple_cmd;
+              CMPLX_CMD complex;
+              complex.cmd_seq = simple_cmd.cmd_seq;
+              complex.param = htobe64((uint64_t)space-spaceTaken);
+              strcpy(complex.data, inet_ntoa(group.imr_multiaddr));
+              set_cmd(complex.cmd, "GOOD_DAY");
+              int send = 26 + strlen(inet_ntoa(group.imr_multiaddr));
+
+              if(sendto(sock, &complex, send, 0, (struct sockaddr *)&src_addr, (socklen_t)sizeof (src_addr)) != send) {
+                  syserr("sendto");
+              }
+          }
+          else if(strncmp(simple_cmd.cmd, "GET", 3) == 0){
+              abc = (CMPLX_CMD *) &simple_cmd;
+
+          }
+          else if(strncmp(simple_cmd.cmd, "LIST", 4) == 0){
+              cout << "Search..";
+              simple_cmd.data[recv_len-18] = '\0';
+              send_file_list_packet(sock, remote_address, simple_cmd.data);
           }
           else{
-              string s(simple_cmd.data);
-              string data_recv = string(simple_cmd.data);
-              if(data_recv.find("AAAAA") != string::npos){
-                printf("WOW");
-              }
-              printf("xd : %s\n", simple_cmd.data);
           }
       }
       for(int i=1; i < MAX_POOL; i++){
