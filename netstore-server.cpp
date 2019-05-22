@@ -34,7 +34,7 @@ using std::getline;
 #define REPEAT_COUNT  8
 #define SLEEP_TIME    1
 #define MAX_POOL 128
-
+uint64_t size;
 void on_timeout(int timeout){
     if(timeout> 300 || timeout <= 0){
         throw std::invalid_argument("Timeout value specified by -t or --TIMEOUT must be between 1 and 300");
@@ -75,11 +75,12 @@ vector<fs::path> check_all_files_for_pattern(vector <fs::path> files, string &pa
     return filenames;
 }
 
-void send_file_list_packet(int sock, struct sockaddr_in dest, string &s, SIMPL_CMD &received, vector<fs::path> files){
+void send_file_list_packet(int sock, struct sockaddr_in dest, SIMPL_CMD &received, vector<fs::path> files){
     SIMPL_CMD packet;
     set_cmd(packet.cmd, "MY_LIST");
     packet.cmd_seq = received.cmd_seq;
     int data_counter = 0;
+    string s = string(received.data);
     int delimiter_counter = -1;
     vector<string> names;
     for(auto &f: files) {
@@ -166,7 +167,8 @@ int main(int argc, const char *argv[]) {
     }
     cout << "Indexing complete, total size: " << spaceTaken << "\n";
     cout << "Free size left: ";
-    cout << space - spaceTaken << "\n";
+    size = space - spaceTaken;
+    cout << size << "\n";
     string str = "CMAKE_BINARY_DIR = /mnt/c/Users/Beniamin/CLionProjects/untitled21/cmake-build-debug\n";
    // vector<fs::path> nowy = check_all_files_for_pattern(Files, str);
     /*for(auto &a : nowy){
@@ -250,6 +252,8 @@ int main(int argc, const char *argv[]) {
       poll(fds, MAX_POOL, -1);
           if(fds[0].fd & POLLIN){
           CMPLX_CMD *abc;
+          //TODO debug
+          abc = (CMPLX_CMD *) &simple_cmd;
           simple_cmd.cmd_seq = 6666;
           cout << "GG, pollin works! Poggers\n";
           memset(&src_addr, 0, sizeof(src_addr));
@@ -262,7 +266,7 @@ int main(int argc, const char *argv[]) {
               cout << "WE GOT HELLO, WOAH\n";
               CMPLX_CMD complex;
               complex.cmd_seq = simple_cmd.cmd_seq;
-              complex.param = htobe64((uint64_t)space-spaceTaken);
+              complex.param = htobe64(size);
               strcpy(complex.data, inet_ntoa(group.imr_multiaddr));
               set_cmd(complex.cmd, "GOOD_DAY");
               int send = 26 + strlen(inet_ntoa(group.imr_multiaddr));
@@ -272,14 +276,63 @@ int main(int argc, const char *argv[]) {
               }
           }
           else if(strncmp(simple_cmd.cmd, "GET", 3) == 0){
-              abc = (CMPLX_CMD *) &simple_cmd;
+              //TODO CONNECT ME
+              //open new tcp socket
+              //TODO fix bledow
+              int i = find_free_fds();
+              fds[i].fd = socket(PF_INET, SOCK_STREAM, 0);
+              socklen_t srcaddr_len = sizeof(src_addr);
+              fds[i].fd = accept(sock, (struct sockaddr *) &src_addr, &srcaddr_len);
+
+              if(bind(fds[i].fd, (struct sockaddr *)&local_address, sizeof(local_address) < 0){
+                  syserr("bind");
+              }
+              if (listen(fds[i].fd, SOMAXCONN) < 0)
+                  syserr("listen");
 
           }
           else if(strncmp(simple_cmd.cmd, "LIST", 4) == 0){
-              cout << "Search..";
+              cout << "Search..\n";
               simple_cmd.data[recv_len-18] = '\0';
-              send_file_list_packet(sock, src_addr, simple_cmd.data);
+              send_file_list_packet(sock, src_addr, simple_cmd, Files);
           }
+          else if(strncmp(simple_cmd.cmd, "ADD", 10)){
+              cout << "Add..\n";
+              abc->data[recv_len-26] = '\0';
+              string fname (abc->data);
+              uint64_t file_size = be64toh(abc->param);
+              if (strcmp(abc->data, "")==0 || fname.find('/')!= string::npos || file_size > size){
+                  //TODO NO_WAY
+                  SIMPL_CMD answer;
+                  set_cmd(answer.cmd, "NO_WAY");
+                  answer.cmd_seq = abc->cmd_seq;
+                  strcpy(answer.data, abc->data);
+                  int size = strlen(answer.data) + 18;
+                  if(sendto(sock, &answer, size, 0, (struct sockaddr*)&src_addr, sizeof src_addr)){
+                      syserr("sendto");
+                  }
+              }
+              else{
+                  //TODO we can send info to client that we accept his file
+              }
+          }
+          else if(strncmp(simple_cmd.cmd, "DEL", 10) == 0 ){
+              cout << "Delete..\n";
+              simple_cmd.data[recv_len-18] = '\0';
+              //delete file
+              for (auto &f: Files){
+                  if(strcmp(f.filename().c_str(), simple_cmd.data) == 0){
+                      try {
+                          fs::remove(f);
+                          break;
+                      }
+                      catch(fs::filesystem_error &err){
+                          cout << err.what();
+                      }
+                  }
+              }
+          }
+          else if()
           else{
           }
       }
