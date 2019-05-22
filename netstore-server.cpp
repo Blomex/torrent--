@@ -144,7 +144,7 @@ int create_new_tcp_socket(uint16_t &port){
     //timeout for accept
     if (setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (char *) &timeout, sizeof(timeout)) < 0) {
         error("setsockopt rcvtimeout\n");
-        close(sock);
+        shutdown(sock, SHUT_WR);
         exit(1);
     }
 
@@ -155,11 +155,20 @@ int create_new_tcp_socket(uint16_t &port){
     port = ntohs(serveraddr.sin_port);
     return sock;
 }
-void receive_file(){
+void send_can_add(string &file, uint16_t port, int sock, struct sockaddr_in client, int main_sock){
+    CMPLX_CMD complex;
+    set_cmd(complex.cmd, "CAN_ADD");
+    complex.param = htobe64(uint64_t(port));
+    strncpy(complex.data, file.c_str(), file.length());
+    int size_to_send = 26 + file.length();
+}
+void receive_file(string &file, int main_sock, struct sockaddr_in client){bi
+    struct sockaddr_in private_client;
+    socklen_t client_address_len = sizeof(private_client);
     uint16_t port;
     int sock = create_new_tcp_socket(port);
     //send "can add"
-    send_can_add();
+    send_can_add(file, port, sock, client, main_sock);
 }
 void send_connect_me(string &file, uint16_t port, int sock, struct sockaddr_in client, int main_sock){
     CMPLX_CMD complex;
@@ -197,6 +206,7 @@ void send_file(string &file, int main_sock, struct sockaddr_in client){
             syserr("partial/failed write");
         }
     }
+    close(msg_sock);
 
 }
 
@@ -277,10 +287,6 @@ int main(int argc, const char *argv[]) {
           cout << "GG, pollin works! Poggers\n";
           memset(&src_addr, 0, sizeof(src_addr));
           ssize_t recv_len = recvfrom(sock, &simple_cmd, sizeof simple_cmd, 0, (struct sockaddr *) &src_addr, &len);
-
-          cout << "say hi\n";
-          int i = recv_len;
-          printf("received : %d\n", i);
           if (strncmp(simple_cmd.cmd, "HELLO", 5) == 0) {
               cout << "WE GOT HELLO, WOAH\n";
               CMPLX_CMD complex;
@@ -322,7 +328,7 @@ int main(int argc, const char *argv[]) {
                   }
               }
               else{
-                  //TODO we can send info to client that we accept his file
+                  receive_file(fname, sock, src_addr);
               }
           }
           else if(strncmp(simple_cmd.cmd, "DEL", 10) == 0 ){
