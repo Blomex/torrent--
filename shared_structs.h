@@ -29,4 +29,6 @@ void set_cmd(char cmd[10], const std::string &message){
         cmd[i] = '\0';
     }
 }
+
+
 #endif //PROJECT_SHARED_STRUCTS_H

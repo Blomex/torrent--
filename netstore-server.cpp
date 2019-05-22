@@ -14,6 +14,7 @@
 #include <netinet/in.h>
 #include <stdio.h>
 #include <string.h>
+#include <atomic>
 #include <unistd.h>
 #include <arpa/inet.h>
 #include <poll.h>
@@ -35,44 +36,33 @@ using std::getline;
 #define SLEEP_TIME    1
 #define MAX_POOL 128
 uint64_t size;
+struct timeval timeout;
 void on_timeout(int timeout){
     if(timeout> 300 || timeout <= 0){
         throw std::invalid_argument("Timeout value specified by -t or --TIMEOUT must be between 1 and 300");
     }
 }
-
-
-bool is_pattern_in_file(const fs::path &path, string &pattern){
-        cout << "Checking if file "<<path.filename()<<" contains designated fragment\n";
-        fs::ifstream ofs{path};
-        fs::ifstream ofs2{path};
-        unsigned long patternLength = pattern.length();
-        char buffer[patternLength * 2];
-        ofs2.read(buffer, patternLength);
-        while (ofs) {
-            ofs.read(buffer, patternLength * 2);
-            string pom = string(buffer);
-            if (pom.find(pattern) != string::npos) {
-                return true;
-            }
-        }
-        while(ofs2){
-            ofs2.read(buffer, patternLength *2);
-            if(string(buffer).find(pattern) != string::npos){
-                return true;
-            }
-        }
-        return false;
-}
-vector<fs::path> check_all_files_for_pattern(vector <fs::path> files, string &pattern){
-   vector<fs::path> filenames;
-    for(auto &f: files){
-        if(is_pattern_in_file(f, pattern)){
-            cout << "found!\n";
-            filenames.emplace_back(f.filename());
-        }
+void set_server_options(string &addr, uint16_t &port, uint64_t &space, string &disc_folder, struct timeval &timeout, int argc, const char *argv[]){
+    try {
+        options_description desc{"Options"};
+        desc.add_options()
+            ("MCAST_ADDR,g", value<string>(&addr)->required(), "adress")
+            ("CMD_PORT,p", value<uint16_t>(&port)->required(), "port")
+            ("MAX_SPACE,b", value<uint64_t>(&space)->default_value(52428800), "max_space")
+            ("SHRD_FLDR,f", value<string>(&disc_folder)->required(), "disc folder")
+            ("TIMEOUT,t", value<time_t>(&(timeout.tv_sec))->default_value(5)->notifier(on_timeout), "timeout");
+        variables_map vm;
+        store(parse_command_line(argc, argv, desc), vm);
+        notify(vm);
     }
-    return filenames;
+    catch (const error &ex) {
+        std::cerr << ex.what() << '\n';
+        exit(0);
+    }
+    catch (std::invalid_argument &ex) {
+        std::cerr << ex.what() << '\n';
+        exit(0);
+    }
 }
 
 void send_file_list_packet(int sock, struct sockaddr_in dest, SIMPL_CMD &received, vector<fs::path> files){
@@ -118,38 +108,7 @@ void send_file_list_packet(int sock, struct sockaddr_in dest, SIMPL_CMD &receive
 
 }
 
-int main(int argc, const char *argv[]) {
-    struct sockaddr_in src_addr;
-    struct timeval timeout;
-    timeout.tv_usec = 0;
-
-    SIMPL_CMD simple_cmd;
-    uint16_t port;
-    uint64_t space;
-    string addr, disc_folder;
-    struct ip_mreq group;
-    try {
-        options_description desc{"Options"};
-        desc.add_options()
-            ("MCAST_ADDR,g", value<string>(&addr)->required(), "adress")
-            ("CMD_PORT,p", value<uint16_t>(&port)->required(), "port")
-            ("MAX_SPACE,b", value<uint64_t>(&space)->default_value(52428800), "max_space")
-            ("SHRD_FLDR,f", value<string>(&disc_folder)->required(), "disc folder")
-            ("TIMEOUT,t", value<time_t>(&(timeout.tv_sec))->default_value(5)->notifier(on_timeout), "timeout");
-        variables_map vm;
-        store(parse_command_line(argc, argv, desc), vm);
-        notify(vm);
-    }
-    catch (const error &ex) {
-        std::cerr << ex.what() << '\n';
-        exit(0);
-    }
-    catch (std::invalid_argument &ex) {
-        std::cerr << ex.what() << '\n';
-        exit(0);
-    }
-    //index files in folder
-    std::vector<fs::path> Files;
+uint64_t index_files(vector<fs::path> &Files, string &disc_folder, uint64_t space){
     cout <<"Indexing files in "<<fs::directory_entry(disc_folder) << " ...\n";
     int spaceTaken = 0;
     try {
@@ -169,11 +128,91 @@ int main(int argc, const char *argv[]) {
     cout << "Free size left: ";
     size = space - spaceTaken;
     cout << size << "\n";
-    string str = "CMAKE_BINARY_DIR = /mnt/c/Users/Beniamin/CLionProjects/untitled21/cmake-build-debug\n";
-   // vector<fs::path> nowy = check_all_files_for_pattern(Files, str);
-    /*for(auto &a : nowy){
-        cout << a;
-    }*/
+    return size;
+}
+
+int create_new_tcp_socket(uint16_t &port){
+    int sock;
+    struct sockaddr_in serveraddr;
+    sock = socket(AF_INET, SOCK_STREAM, 0);//TCP
+    if(sock<0){
+        syserr("socket");
+    }
+    serveraddr.sin_family = AF_INET;
+    serveraddr.sin_addr.s_addr = htonl(INADDR_ANY);
+    serveraddr.sin_port = htons(0);
+    //timeout for accept
+    if (setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (char *) &timeout, sizeof(timeout)) < 0) {
+        error("setsockopt rcvtimeout\n");
+        close(sock);
+        exit(1);
+    }
+
+    if (bind(sock, (struct sockaddr *) &serveraddr, sizeof(serveraddr)) < 0)
+        syserr("bind");
+    if (listen(sock, 1) < 0)
+        syserr("listen");
+    port = ntohs(serveraddr.sin_port);
+    return sock;
+}
+void receive_file(){
+    uint16_t port;
+    int sock = create_new_tcp_socket(port);
+    //send "can add"
+    send_can_add();
+}
+void send_connect_me(string &file, uint16_t port, int sock, struct sockaddr_in client, int main_sock){
+    CMPLX_CMD complex;
+    set_cmd(complex.cmd, "CONNECT_ME");
+    complex.param = htobe64(uint64_t(port));
+    strncpy(complex.data, file.c_str(), file.length());
+    int size_to_send = 26 + file.length();
+    if(sendto(main_sock, (char*)&complex, size_to_send,0 , (struct sockaddr*)&client, sizeof(client)) != size_to_send){
+        syserr("partial sendto");
+    }
+
+}
+void send_file(string &file, int main_sock, struct sockaddr_in client){
+    uint16_t port;
+    struct sockaddr_in private_client;
+    socklen_t client_address_len = sizeof(private_client);
+    int sock = create_new_tcp_socket(port);
+    send_connect_me(file, port, sock, client, main_sock);
+    //now wait for accept for timeout seconds.
+    int msg_sock = accept(sock, (struct sockaddr*)&private_client,  &client_address_len);
+    if(msg_sock<0){
+        perror("accept");
+        close(msg_sock);
+        close(sock);
+        return;
+    }
+    //we accepted so we can send now
+    //send file
+    fs::path filePath{file};
+    std::ifstream stream(filePath.c_str(), std::ios::binary);
+    uint64_t size = filePath.size();
+    std::vector<char> buffer(size);
+    if(stream.read(buffer.data(), size)){
+        if(write(msg_sock, &buffer, size)!= size){
+            syserr("partial/failed write");
+        }
+    }
+
+}
+
+int main(int argc, const char *argv[]) {
+    struct sockaddr_in src_addr;
+    timeout.tv_usec = 0;
+
+    SIMPL_CMD simple_cmd;
+    uint16_t port;
+    uint64_t space;
+    string addr, disc_folder;
+    struct ip_mreq group;
+    set_server_options(addr, port, space, disc_folder, timeout, argc, argv);
+    //index files in folder
+    std::vector<fs::path> Files;
+    int size = index_files(Files, disc_folder, space);
     /* zmienne i struktury opisujące gniazda */
     int sock, optval;
     struct sockaddr_in local_address;
@@ -185,16 +224,6 @@ int main(int argc, const char *argv[]) {
     size_t length;
     time_t time_buffer;
     char buffer[BSIZE];
-
-    /*inicjacja pooli*/
-    struct pollfd fds[MAX_POOL];
-    for(int i=0; i<MAX_POOL; i++){
-        fds[i].fd = -1;
-        //sprawdzamy czy nadeszly dane do odczytu
-        fds[i].events = POLLIN;
-        //narazie jeszcze funkcja poll() nie zostala wykonana
-        fds[i].revents = 0;
-    }
 
     /* otworzenie gniazda */
     sock = socket(AF_INET, SOCK_DGRAM, 0);
@@ -210,7 +239,6 @@ int main(int argc, const char *argv[]) {
             exit(1);
         }
     }
-
 
 /* podpięcie się pod lokalny adres i port */
     local_address.sin_family = AF_INET;
@@ -233,24 +261,15 @@ int main(int argc, const char *argv[]) {
     optval = 1;
     if (setsockopt(sock, SOL_SOCKET, SO_BROADCAST, (void*)&optval, sizeof optval) < 0)
         syserr("setsockopt broadcast");
-
-    /* ustawienie TTL dla datagramów rozsyłanych do grupy */
-//    optval = TTL_VALUE;
-//    if (setsockopt(sock, IPPROTO_IP, IP_MULTICAST_TTL, (void*)&optval, sizeof optval) < 0)
-//        syserr("setsockopt multicast ttl");
-
 //    /* zablokowanie rozsyłania grupowego do siebie */
 //    optval = 0;
 //    if (setsockopt(sock, SOL_IP, IP_MULTICAST_LOOP, (void*)&optval, sizeof optval) < 0)
 //      syserr("setsockopt loop");
 
-  fds[0].fd = sock;
 
   /*czytanie wszystkiego z socketu UDP*/
   bool xd = true;
   do {
-      poll(fds, MAX_POOL, -1);
-          if(fds[0].fd & POLLIN){
           CMPLX_CMD *abc;
           //TODO debug
           abc = (CMPLX_CMD *) &simple_cmd;
@@ -277,19 +296,9 @@ int main(int argc, const char *argv[]) {
           }
           else if(strncmp(simple_cmd.cmd, "GET", 3) == 0){
               //TODO CONNECT ME
-              //open new tcp socket
-              //TODO fix bledow
-              int i = find_free_fds();
-              fds[i].fd = socket(PF_INET, SOCK_STREAM, 0);
-              socklen_t srcaddr_len = sizeof(src_addr);
-              fds[i].fd = accept(sock, (struct sockaddr *) &src_addr, &srcaddr_len);
-
-              if(bind(fds[i].fd, (struct sockaddr *)&local_address, sizeof(local_address) < 0){
-                  syserr("bind");
-              }
-              if (listen(fds[i].fd, SOMAXCONN) < 0)
-                  syserr("listen");
-
+              simple_cmd.data[recv_len-18]='\0';
+              string filename = simple_cmd.data;
+              send_file(filename, sock, src_addr);
           }
           else if(strncmp(simple_cmd.cmd, "LIST", 4) == 0){
               cout << "Search..\n";
@@ -332,16 +341,8 @@ int main(int argc, const char *argv[]) {
                   }
               }
           }
-          else if()
           else{
           }
-      }
-      for(int i=1; i < MAX_POOL; i++){
-
-          if(fds[1].fd & POLLIN){
-
-          }
-      }
   }while(xd);
 
 
