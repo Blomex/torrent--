@@ -162,7 +162,7 @@ void send_can_add(string &file, uint16_t port, int sock, struct sockaddr_in clie
     strncpy(complex.data, file.c_str(), file.length());
     int size_to_send = 26 + file.length();
 }
-void receive_file(string &file, int main_sock, struct sockaddr_in client){bi
+void receive_file(string &file, int main_sock, struct sockaddr_in client){
     struct sockaddr_in private_client;
     socklen_t client_address_len = sizeof(private_client);
     uint16_t port;
