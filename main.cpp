@@ -2,22 +2,12 @@
 #include <sstream>
 #include <boost/program_options.hpp>
 #include <boost/filesystem.hpp>
-#include <fstream>
 #include "shared_structs.h"
-#include <sys/types.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <thread>
-#include <stdio.h>
-#include <atomic>
-#include <string.h>
-#include <unistd.h>
 #include <arpa/inet.h>
-#include <poll.h>
-#include "err.h"
 #include <boost/algorithm/string.hpp>
-#include <chrono>
-#include <boost/filesystem/path.hpp>
 #define N 100
 #define BUFFER_SIZE   2000
 #define QUEUE_LENGTH     5
@@ -42,7 +32,7 @@ const string GET = "GET";
 uint64_t cmd_seq = 1;
 int timeout;
 
-int prepare_to_send(SIMPL_CMD &packet, char cmd[10], const string &data) {
+int prepare_to_send(SIMPL_CMD &packet, const char cmd[10], const string &data) {
     for (int i = 0; i < 10; i++) {
         packet.cmd[i] = cmd[i];
     }
@@ -54,6 +44,7 @@ int prepare_to_send(SIMPL_CMD &packet, char cmd[10], const string &data) {
 int prepare_to_send_param(CMPLX_CMD &packet, uint64_t param, const string &data) {
     strncpy(packet.data, data.c_str(), sizeof(packet.data));
     packet.cmd_seq = cmd_seq;
+    packet.param = htobe64(param);
     return data.length() + sizeof(packet.cmd_seq) + sizeof(packet.cmd) + sizeof(packet.param);
 }
 
@@ -76,7 +67,7 @@ void perform_search(const string &s, int sock, struct sockaddr_in &remote_addres
     socklen_t len = sizeof(struct sockaddr_in);
     auto start = high_resolution_clock::now();
 
-    while (1) {
+    while (true) {
         //TODO do poprawy
         auto end = high_resolution_clock::now();
         duration<double, std::milli> elapsed = end - start;
@@ -123,10 +114,10 @@ void perform_discover(int sock, struct sockaddr_in &remote_address) {
     if (sendto(sock, &packet, length, 0, (struct sockaddr *) &remote_address, sizeof remote_address) != length)
         syserr("sendto");
     CMPLX_CMD p3;
-    struct sockaddr_in server;
+    struct sockaddr_in server{};
     socklen_t len = sizeof(struct sockaddr_in);
     auto start = high_resolution_clock::now();
-    while (1) {
+    while (true) {
         //TODO do poprawy
         auto end = high_resolution_clock::now();
         duration<double, std::milli> elapsed = end - start;
@@ -141,7 +132,7 @@ void perform_discover(int sock, struct sockaddr_in &remote_address) {
         //check if we got packet we are expecting
         int port = ntohs(server.sin_port);
         string ip = inet_ntoa(server.sin_addr);
-        if (strncmp(p3.cmd, "MY_LIST", 7) == 0 && be64toh(p3.cmd_seq) == cmd_seq) {
+        if (strncmp(p3.cmd, "GOOD_DAY", 7) == 0 && be64toh(p3.cmd_seq) == cmd_seq) {
             cout << "Found " << ip << " (" << p3.data << ") with free space " << be64toh(p3.param) << "\n";
         } else {
             cout << "[PCKG ERROR]  Skipping invalid package from " << ip << ":" << port << ".\n";
@@ -151,7 +142,7 @@ void perform_discover(int sock, struct sockaddr_in &remote_address) {
 }
 
 void create_udp_socket(int &sock, string &addr, int port, struct sockaddr_in &localSock, struct sockaddr_in &remote_address){
-    struct timeval s_timeout;
+    struct timeval s_timeout{};
     s_timeout.tv_usec = 10;
     sock = socket(PF_INET, SOCK_DGRAM, 0); // creating IPv4 UDP socket
     if (sock < 0) {
@@ -160,7 +151,7 @@ void create_udp_socket(int &sock, string &addr, int port, struct sockaddr_in &lo
 
     //set timeout
     if (setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (char *) &s_timeout, sizeof(s_timeout)) < 0) {
-        error("setsockopt rcvtimeout\n");
+        error give_me_a_name("setsockopt rcvtimeout\n");
         close(sock);
         exit(1);
     }
@@ -203,7 +194,7 @@ void perform_upload(string &filename, string &addr, int port, struct sockaddr_in
         string err = "File "+filename +" does not exist\n";
         cout <<err;
     }
-    struct sockaddr_in local;
+    struct sockaddr_in local{};
     int sock;
     create_udp_socket(sock, addr, port, local, remote_address);
     SIMPL_CMD packet;
@@ -213,10 +204,10 @@ void perform_upload(string &filename, string &addr, int port, struct sockaddr_in
         syserr("sendto");
 
     CMPLX_CMD p3;
-    struct sockaddr_in server;
+    struct sockaddr_in server{};
     socklen_t len = sizeof(struct sockaddr_in);
     auto start = high_resolution_clock::now();
-    while (1) {
+    while (true) {
         //TODO do poprawy
         auto end = high_resolution_clock::now();
         duration<double, std::milli> elapsed = end - start;
@@ -267,7 +258,7 @@ void set_options(int argc, const char * argv[], string &addr, uint16_t &port, st
     cout << "ready to read: \n";
 }
 int main(int argc, const char *argv[]) {
-    struct timeval s_timeout;
+    struct timeval s_timeout{};
     s_timeout.tv_usec = 10;
     s_timeout.tv_sec = 0;
     uint16_t port;
@@ -280,9 +271,8 @@ int main(int argc, const char *argv[]) {
 
     //TODO get ready with shit
     //server variables
-    ssize_t len, snd_len;
-    struct sockaddr_in localSock;
-    struct sockaddr_in remote_address;
+    struct sockaddr_in localSock{};
+    struct sockaddr_in remote_address{};
     int sock = socket(PF_INET, SOCK_DGRAM, 0); // creating IPv4 UDP socket
     if (sock < 0) {
         syserr("socket");
@@ -290,7 +280,7 @@ int main(int argc, const char *argv[]) {
 
     //set timeout
     if (setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (char *) &s_timeout, sizeof(s_timeout)) < 0) {
-        error("setsockopt rcvtimeout\n");
+        error give_me_a_name("setsockopt rcvtimeout\n");
         close(sock);
         exit(1);
     }
@@ -345,7 +335,7 @@ int main(int argc, const char *argv[]) {
             } else if (a == "search") {
                 //TODO search
                 cout << "performing search..\n";
-                string s = "";
+                string s = s;
                 perform_search(s, sock, remote_address);
             } else {
                 cout << a << " is unrecognized command or requires parameter\n";
