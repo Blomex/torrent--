@@ -9,6 +9,7 @@
 #include <thread>
 #include <arpa/inet.h>
 #include <boost/algorithm/string.hpp>
+#include <future>
 #define N 100
 #define BUFFER_SIZE   2000
 #define QUEUE_LENGTH     5
@@ -21,6 +22,8 @@ using std::cout;
 using std::cin;
 using std::getline;
 using std::vector;
+using std::future;
+using std::cerr;
 using namespace std::chrono;
 const string HELLO = "HELLO";
 const string GOOD_DAY = "GOOD_DAY";
@@ -42,6 +45,7 @@ int prepare_to_send(SIMPL_CMD &packet, const char cmd[10], const string &data) {
     packet.cmd_seq = htobe64(cmd_seq);
     return data.length() + sizeof(packet.cmd_seq) + sizeof(packet.cmd);
 }
+
 int prepare_to_send_param(CMPLX_CMD &packet, uint64_t param, const string &data) {
     strncpy(packet.data, data.c_str(), sizeof(packet.data));
     packet.cmd_seq = cmd_seq;
@@ -63,7 +67,7 @@ void perform_search(const string &s, int sock, struct sockaddr_in &remote_addres
     int length = prepare_to_send(packet, cmd, s);
     if (sendto(sock, &packet, length, 0, (struct sockaddr *) &remote_address, sizeof remote_address) != length)
         syserr("write");
-    CMPLX_CMD p3;
+    SIMPL_CMD p3;
     struct sockaddr_in server;
     socklen_t len = sizeof(struct sockaddr_in);
     auto start = high_resolution_clock::now();
@@ -79,7 +83,7 @@ void perform_search(const string &s, int sock, struct sockaddr_in &remote_addres
         if (x < 0) {
             continue;
         }
-        p3.data[x - 26] = '\0';
+        p3.data[x - 18] = '\0';
         //check if we got packet we are expecting
         int port = ntohs(server.sin_port);
         string ip = inet_ntoa(server.sin_addr);
@@ -186,21 +190,54 @@ void create_udp_socket(int &sock, string &addr, int port, struct sockaddr_in &lo
         syserr("inet_aton");
 }
 
+int create_tcp_socket(CMPLX_CMD message){
+
+    int sock;
+    struct sockaddr_in serveraddr{};
+    sock = socket(AF_INET, SOCK_STREAM, 0);//TCP
+    if(sock<0){
+        syserr("socket");
+    }
+    serveraddr.sin_family = AF_INET;
+    serveraddr.sin_addr.s_addr = htonl(INADDR_ANY);
+    serveraddr.sin_port = htons(static_cast<uint16_t>(message.param));
+    //timeout for accept
+    if (setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (char *) &timeout, sizeof(timeout)) < 0) {
+        error give_me_a_name("setsockopt rcvtimeout\n");
+        close(sock);
+        exit(1);
+    }
+    if (setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, (char *) &timeout, sizeof(timeout)) < 0) {
+        error give_me_a_name("setsockopt sndtimeout\n");
+        close(sock);
+        exit(1);
+    }
+    if(connect(sock, (struct sockaddr*)&serveraddr, sizeof serveraddr) < 0){
+        syserr("connect");
+    }
+
+    socklen_t server_sock_len = sizeof serveraddr;
+    if(getsockname(sock, (struct sockaddr*) &serveraddr, &server_sock_len)<0){
+        syserr("getsockname");
+    }
+    return sock;
+}
+
 void perform_upload(string &filename, string &addr, int port, struct sockaddr_in remote_address) {
     //discover servers first
     //create new socket to discover
     std::set<std::pair<uint64_t, string>> servers;
     fs::path file = filename.c_str();
     if(!fs::exists(file)){
-        string err = "File "+filename +" does not exist\n";
+        string err = "File "+ fs::current_path().string() +" does not exist\n";
         cout <<err;
     }
     struct sockaddr_in local{};
     int sock;
     create_udp_socket(sock, addr, port, local, remote_address);
-    SIMPL_CMD packet;
-    set_cmd(packet.cmd, "HELLO");
-    int length = prepare_to_send(packet, packet.cmd, "");
+    CMPLX_CMD packet;
+    set_cmd(packet.cmd, "ADD");
+    int length = prepare_to_send_param(packet, 1, filename);
     if (sendto(sock, &packet, length, 0, (struct sockaddr *) &remote_address, sizeof remote_address) != length)
         syserr("sendto");
 
@@ -258,7 +295,10 @@ void set_options(int argc, const char * argv[], string &addr, uint16_t &port, st
     cout << "timeout" << timeout << "\n";
     cout << "ready to read: \n";
 }
+
+
 int main(int argc, const char *argv[]) {
+    cout << sizeof(CMPLX_CMD) << " "<< sizeof(SIMPL_CMD) << "\n";
     struct timeval s_timeout{};
     s_timeout.tv_usec = 10;
     s_timeout.tv_sec = 0;
@@ -266,10 +306,7 @@ int main(int argc, const char *argv[]) {
     string addr, savedir;
     set_options(argc, argv, addr, port, savedir, timeout);
 
-    string command;
-    string param;
-    string line;
-
+    string command, param, line;
     //TODO get ready with shit
     //server variables
     struct sockaddr_in localSock{};
@@ -314,8 +351,7 @@ int main(int argc, const char *argv[]) {
     remote_address.sin_port = htons(port);
     if (inet_aton(addr.c_str(), &remote_address.sin_addr) == 0)
         syserr("inet_aton");
-    /* if (connect(sock, (struct sockaddr *)&remote_address, sizeof remote_address) < 0)
-         syserr("connect");*/
+
 
     while (getline(cin, line)) {
         string a, b;
@@ -336,10 +372,10 @@ int main(int argc, const char *argv[]) {
             } else if (a == "search") {
                 //TODO search
                 cout << "performing search..\n";
-                string s = s;
-                perform_search(s, sock, remote_address);
+                perform_search(b, sock, remote_address);
             } else {
-                cout << a << " is unrecognized command or requires parameter\n";
+                //TODO remove
+                cerr << a << " is unrecognized command or requires parameter\n";
             }
         } else {
             string c;
@@ -354,11 +390,10 @@ int main(int argc, const char *argv[]) {
                 perform_search(b, sock, remote_address);
             } else if (a == "upload") {
                 //TODO upload
-                std::thread t1{perform_upload, std::ref(b), std::ref(addr), port, std::ref(remote_address)};
-                t1.detach();
-                //perform_upload(b,addr, port, remote_address);
+                auto t1 = std::async(std::launch::async, perform_upload, std::ref(b), std::ref(addr), port, std::ref(remote_address));
             } else {
-                cout << a << " is unrecognized command or requires to be without parameters\n";
+                //TODO remove
+                cerr << a << " is unrecognized command or requires to be without parameters\n";
             }
             //only fetch, search, upload are correct
         }
