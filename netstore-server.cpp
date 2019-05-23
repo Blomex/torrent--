@@ -6,6 +6,7 @@
 #include <boost/program_options.hpp>
 #include <boost/filesystem.hpp>
 #include "shared_structs.h"
+#include "err.h"
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
