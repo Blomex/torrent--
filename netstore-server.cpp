@@ -10,6 +10,7 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include <fcntl.h>
 #include <boost/algorithm/string.hpp>
 using namespace boost::program_options;
 namespace fs = boost::filesystem;
@@ -32,6 +33,7 @@ void on_timeout(int timeout){
         throw std::invalid_argument("Timeout value specified by -t or --TIMEOUT must be between 1 and 300");
     }
 }
+//DZIALA
 void set_server_options(string &addr, uint16_t &port, uint64_t &space, string &disc_folder, struct timeval &timeout, int argc, const char *argv[]){
     try {
         options_description desc{"Options"};
@@ -54,7 +56,7 @@ void set_server_options(string &addr, uint16_t &port, uint64_t &space, string &d
         exit(0);
     }
 }
-
+//DZIALA
 void send_file_list_packet(int sock, struct sockaddr_in dest, SIMPL_CMD &received, vector<fs::path> files){
     SIMPL_CMD packet;
     set_cmd(packet.cmd, "MY_LIST");
@@ -97,7 +99,7 @@ void send_file_list_packet(int sock, struct sockaddr_in dest, SIMPL_CMD &receive
     }
 
 }
-
+//DZIALA
 uint64_t index_files(vector<fs::path> &Files, string &disc_folder, uint64_t space){
     cout <<"Indexing files in "<<fs::directory_entry(disc_folder) << " ...\n";
     int spaceTaken = 0;
@@ -150,7 +152,7 @@ int create_new_tcp_socket(uint16_t &port){
     port = ntohs(serveraddr.sin_port);
     return sock;
 }
-
+//chyba dziala
 void send_can_add(string &file, uint16_t port, struct sockaddr_in client, int main_sock){
     CMPLX_CMD complex;
     set_cmd(complex.cmd, "CAN_ADD");
@@ -161,7 +163,20 @@ void send_can_add(string &file, uint16_t port, struct sockaddr_in client, int ma
         syserr("partial sendto");
     }
 }
-
+//DZIALA
+void receive_file_from_socket(int fd, string &file){
+    fs::ofstream ofs(fs::path{file}, std::ofstream::binary);
+    char buffer[50];
+    int size = 50;
+    int bytes = 1;
+    while(bytes != 0){
+        bytes = read(fd, buffer, size);
+        ofs.write(buffer, bytes);
+    }
+    ofs.close();
+    close(fd);
+}
+//chyba dziala
 void receive_file(string &file, int main_sock, struct sockaddr_in client){
     struct sockaddr_in private_client{};
     socklen_t client_address_len = sizeof(private_client);
@@ -180,10 +195,9 @@ void receive_file(string &file, int main_sock, struct sockaddr_in client){
     //connection accepted, we can read file from socket and save it
     fs::ofstream stream(file, std::ios::binary);
     //TODO receive bytes from TCP socket and write them to stream
-
-
-    stream.close();
+    receive_file_from_socket(msg_sock, file);
 }
+//chyba dziala
 void send_connect_me(string &file, uint16_t port, struct sockaddr_in client, int main_sock){
     CMPLX_CMD complex;
     set_cmd(complex.cmd, "CONNECT_ME");
@@ -195,6 +209,24 @@ void send_connect_me(string &file, uint16_t port, struct sockaddr_in client, int
     }
 
 }
+
+void send_file_to_socket(int msg_sock, string &file){
+    //TODO czy na pewno tak?
+    fs::path filePath{file};
+    std::ifstream ifs(filePath.c_str(), std::ios::binary);
+    char buffer[50];
+    if(ifs){
+        ifs.read(buffer, size);
+        std::streamsize bytes = ifs.gcount();
+        if(write(msg_sock, &buffer, bytes)!= bytes){
+            syserr("partial/failed write");
+        }
+    }
+    ifs.close();
+    close(msg_sock);
+
+}
+
 void send_file(string &file, int main_sock, struct sockaddr_in client){
     uint16_t port;
     struct sockaddr_in private_client{};
@@ -211,17 +243,18 @@ void send_file(string &file, int main_sock, struct sockaddr_in client){
     }
     //we accepted so we can send now
     //send file
-    fs::path filePath{file};
-    std::ifstream stream(filePath.c_str(), std::ios::binary);
-    int64_t size = filePath.size();
-    std::vector<char> buffer(size);
-    if(stream.read(buffer.data(), size)){
-        if(write(msg_sock, &buffer, size)!= size){
-            syserr("partial/failed write");
-        }
-    }
-    close(msg_sock);
+    send_file_to_socket(msg_sock, file);
+}
 
+void send_no_way(string &fname, uint64_t cmd_seq, int sock, struct sockaddr_in src_addr){
+    SIMPL_CMD answer;
+    set_cmd(answer.cmd, "NO_WAY");
+    answer.cmd_seq = cmd_seq;
+    strcpy(answer.data, fname.c_str());
+    int size = strlen(answer.data) + 18;
+    if(sendto(sock, &answer, size, 0, (struct sockaddr*)&src_addr, sizeof src_addr)){
+        syserr("sendto");
+    }
 }
 
 int main(int argc, const char *argv[]) {
@@ -293,7 +326,6 @@ int main(int argc, const char *argv[]) {
           //TODO debug
           abc = (CMPLX_CMD *) &simple_cmd;
           simple_cmd.cmd_seq = 6666;
-          cout << "GG, pollin works! Poggers\n";
           memset(&src_addr, 0, sizeof(src_addr));
           ssize_t recv_len = recvfrom(sock, &simple_cmd, sizeof simple_cmd, 0, (struct sockaddr *) &src_addr, &len);
           if (strncmp(simple_cmd.cmd, "HELLO", 5) == 0) {
@@ -312,7 +344,13 @@ int main(int argc, const char *argv[]) {
               //TODO CONNECT ME
               simple_cmd.data[recv_len-18]='\0';
               string filename = simple_cmd.data;
-              send_file(filename, sock, src_addr);
+              if(std::find(Files.begin(), Files.end(), fs::path{filename}) == Files.end()){
+                  //TODO powinien byc simple a nie complex
+                  send_no_way(filename,simple_cmd.cmd_seq, sock, src_addr);
+              }
+              else {
+                  send_file(filename, sock, src_addr);
+              }
           }
           else if(strncmp(simple_cmd.cmd, "LIST", 4) == 0){
               cout << "Search..\n";
@@ -325,15 +363,7 @@ int main(int argc, const char *argv[]) {
               string fname (abc->data);
               int64_t file_size = be64toh(abc->param);
               if (strcmp(abc->data, "")==0 || fname.find('/')!= string::npos || file_size > size){
-                  //TODO NO_WAY
-                  SIMPL_CMD answer;
-                  set_cmd(answer.cmd, "NO_WAY");
-                  answer.cmd_seq = abc->cmd_seq;
-                  strcpy(answer.data, abc->data);
-                  int size = strlen(answer.data) + 18;
-                  if(sendto(sock, &answer, size, 0, (struct sockaddr*)&src_addr, sizeof src_addr)){
-                      syserr("sendto");
-                  }
+                  send_no_way(fname, abc->cmd_seq, sock, src_addr);
               }
               else{
                   receive_file(fname, sock, src_addr);

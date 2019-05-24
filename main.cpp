@@ -178,7 +178,6 @@ void create_udp_socket(int &sock, string &addr, int port, struct sockaddr_in &lo
         syserr("bind");
     }
 
-
     /* ustawienie adresu i portu odbiorcy */
     remote_address.sin_family = AF_INET;
     remote_address.sin_port = htons(port);
@@ -189,12 +188,14 @@ void create_udp_socket(int &sock, string &addr, int port, struct sockaddr_in &lo
 void perform_upload(string &filename, string &addr, int port, struct sockaddr_in remote_address) {
     //discover servers first
     //create new socket to discover
-    std::set<std::pair<uint64_t, string>> servers;
+    vector<std::pair<uint64_t, string>> servers;
     fs::path file = filename.c_str();
     if(!fs::exists(file)){
         string err = "File "+filename +" does not exist\n";
         cout <<err;
     }
+
+    //Znajduje serwery
     struct sockaddr_in local{};
     int sock;
     create_udp_socket(sock, addr, port, local, remote_address);
@@ -222,13 +223,29 @@ void perform_upload(string &filename, string &addr, int port, struct sockaddr_in
         p3.data[x - 26] = '\0';
         //check if we got packet we are expecting
         string ip = inet_ntoa(server.sin_addr);
-        if (strncmp(p3.cmd, "MY_LIST", 7) == 0 && be64toh(p3.cmd_seq) == cmd_seq) {
+        if (strncmp(p3.cmd, "GOOD_DAY", 10) == 0 && be64toh(p3.cmd_seq) == cmd_seq) {
             uint64_t freeSpace =  be64toh(p3.param);
-            servers.insert(std::make_pair(freeSpace, ip));
+            servers.push_back(std::make_pair(freeSpace, ip));
+            cout << "found \n";
         } else {
-            cout << "[PCKG ERROR]  Skipping invalid package from " << ip << ":" << port << ".\n";
+            //niepotrzebne - to jest nasz prywatny pakiet którego klient nie musi widzieć
+            //cout << "[PCKG ERROR]  Skipping invalid package from " << ip << ":" << port << ".\n";
         }
     }
+
+    //TODO teraz szukamy serwer i wysyłamy zapytania, oczekując na odpowiedź "NO_WAY" albo "CAN_ADD"
+    std::sort(servers.begin(), servers.end(), std::greater<>());
+    for(auto &serv: servers){
+        if(serv.first < fs::file_size(file)){
+            break;
+        }
+        //Send "ADD" and wait for answer
+        CMPLX_CMD add_packet;
+        set_cmd(add_packet.cmd, "ADD");
+        int size = prepare_to_send_param(add_packet, fs::file_size(file), filename);
+//TODO wszystko
+    }
+
 }
 
 void set_options(int argc, const char * argv[], string &addr, uint16_t &port, string &savedir, int &timeout){
@@ -336,7 +353,7 @@ int main(int argc, const char *argv[]) {
             } else if (a == "search") {
                 //TODO search
                 cout << "performing search..\n";
-                string s = s;
+                string s = b;
                 perform_search(s, sock, remote_address);
             } else {
                 cout << a << " is unrecognized command or requires parameter\n";

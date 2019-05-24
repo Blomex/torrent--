@@ -10,6 +10,8 @@ INCLUDE_DIRECTORIES( ${Boost_INCLUDE_DIR} )
 
 ADD_EXECUTABLE( netstore-client main.cpp shared_structs.h err.h err.cpp)
 ADD_EXECUTABLE( netstore-server netstore-server.cpp shared_structs.h err.h err.cpp)
+ADD_EXECUTABLE(snippet snippet.cpp)
+target_link_libraries(snippet Boost::filesystem)
 target_link_libraries(netstore-server Boost::filesystem Boost::program_options Threads::Threads)
 target_link_libraries(netstore-client Boost::filesystem Boost::program_options Threads::Threads)
 #TARGET_LINK_LIBRARIES( netstore-client LINK_PUBLIC ${Boost_LIBRARIES} )
