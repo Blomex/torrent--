@@ -12,6 +12,7 @@
 #include <arpa/inet.h>
 #include <fcntl.h>
 #include <boost/algorithm/string.hpp>
+#include <future>
 using namespace boost::program_options;
 namespace fs = boost::filesystem;
 using namespace boost::algorithm;
@@ -21,6 +22,7 @@ using std::vector;
 using std::cin;
 using std::string;
 using std::getline;
+using std::future;
 #define BSIZE         256
 #define TTL_VALUE     4
 #define REPEAT_COUNT  8
@@ -59,6 +61,7 @@ void set_server_options(string &addr, uint16_t &port, uint64_t &space, string &d
 //DZIALA
 void send_file_list_packet(int sock, struct sockaddr_in dest, SIMPL_CMD &received, vector<fs::path> files){
     SIMPL_CMD packet;
+    packet.data[0]='\0';
     set_cmd(packet.cmd, "MY_LIST");
     packet.cmd_seq = received.cmd_seq;
     int data_counter = 0;
@@ -70,11 +73,11 @@ void send_file_list_packet(int sock, struct sockaddr_in dest, SIMPL_CMD &receive
             if (data_counter + delimiter_counter + f.filename().string().length() > MAX_DATA_SIZE) {
                 strcpy(packet.data, boost::join(names, "\n").c_str());
                 if (sendto(sock,
-                           &packet,
+                           (SIMPL_CMD *)&packet,
                            (size_t) 18 + data_counter + delimiter_counter,
                            0,
                            (struct sockaddr *) &dest,
-                           sizeof(dest)) != data_counter + 18) {
+                           sizeof(dest)) != data_counter + 18 + delimiter_counter) {
                     syserr("sendto");
                 }
                 data_counter = 0;
@@ -85,6 +88,7 @@ void send_file_list_packet(int sock, struct sockaddr_in dest, SIMPL_CMD &receive
             delimiter_counter++;
             data_counter += f.filename().string().length();
         }
+    }
         strcpy(packet.data, boost::join(names, "\n").c_str());
         if (data_counter > 0) {
             if (sendto(sock,
@@ -92,13 +96,12 @@ void send_file_list_packet(int sock, struct sockaddr_in dest, SIMPL_CMD &receive
                        (size_t) 18 + data_counter + delimiter_counter,
                        0,
                        (struct sockaddr *) &dest,
-                       sizeof(dest)) != data_counter + 18) {
+                       sizeof(dest)) != data_counter + 18 + delimiter_counter) {
                 syserr("sendto");
             }
         }
-    }
-
 }
+
 //DZIALA
 uint64_t index_files(vector<fs::path> &Files, string &disc_folder, uint64_t space){
     cout <<"Indexing files in "<<fs::directory_entry(disc_folder) << " ...\n";
@@ -123,7 +126,7 @@ uint64_t index_files(vector<fs::path> &Files, string &disc_folder, uint64_t spac
     return size;
 }
 
-//chyba dziala
+//timeout same as timeout given in arguments
 int create_new_tcp_socket(uint16_t &port){
     int sock;
     struct sockaddr_in serveraddr{};
@@ -137,6 +140,11 @@ int create_new_tcp_socket(uint16_t &port){
     //timeout for accept
     if (setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (char *) &timeout, sizeof(timeout)) < 0) {
         error give_me_a_name("setsockopt rcvtimeout\n");
+        shutdown(sock, SHUT_WR);
+        exit(1);
+    }
+    if (setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, (char *) &timeout, sizeof(timeout)) < 0) {
+        error give_me_a_name("setsockopt sndtimeout\n");
         shutdown(sock, SHUT_WR);
         exit(1);
     }
@@ -159,7 +167,7 @@ void send_can_add(string &file, uint16_t port, struct sockaddr_in client, int ma
     complex.param = htobe64(uint64_t(port));
     strncpy(complex.data, file.c_str(), file.length());
     ssize_t size_to_send = 26 + file.length();
-    if(sendto(main_sock, (char*)&complex, static_cast<size_t>(size_to_send), 0 , (struct sockaddr*)&client, sizeof(client)) != size_to_send){
+    if(sendto(main_sock, &complex, static_cast<size_t>(size_to_send), 0 , (struct sockaddr*)&client, sizeof(client)) != size_to_send){
         syserr("partial sendto");
     }
 }
@@ -177,7 +185,7 @@ void receive_file_from_socket(int fd, string &file){
     close(fd);
 }
 //chyba dziala
-void receive_file(string &file, int main_sock, struct sockaddr_in client){
+remoteFile receive_file(string &file, int main_sock, struct sockaddr_in client){
     struct sockaddr_in private_client{};
     socklen_t client_address_len = sizeof(private_client);
     uint16_t port;
@@ -187,17 +195,17 @@ void receive_file(string &file, int main_sock, struct sockaddr_in client){
     //now accept connection
     int msg_sock = accept(sock, (struct sockaddr*)&private_client,  &client_address_len);
     if(msg_sock<0){
-        perror("accept");
         close(msg_sock);
         close(sock);
-        return;
+        //TODO fix
+        return{false, 0, ""};
     }
     //connection accepted, we can read file from socket and save it
     fs::ofstream stream(file, std::ios::binary);
     //TODO receive bytes from TCP socket and write them to stream
     receive_file_from_socket(msg_sock, file);
+    return {true, fs::file_size(file), file};
 }
-//chyba dziala
 void send_connect_me(string &file, uint16_t port, struct sockaddr_in client, int main_sock){
     CMPLX_CMD complex;
     set_cmd(complex.cmd, "CONNECT_ME");
@@ -257,25 +265,13 @@ void send_no_way(string &fname, uint64_t cmd_seq, int sock, struct sockaddr_in s
     }
 }
 
-int main(int argc, const char *argv[]) {
-    struct sockaddr_in src_addr{};
-    timeout.tv_usec = 0;
-    SIMPL_CMD simple_cmd;
-    uint16_t port;
-    uint64_t space;
-    string addr, disc_folder;
-    struct ip_mreq group{};
-    set_server_options(addr, port, space, disc_folder, timeout, argc, argv);
-    //index files in folder
-    std::vector<fs::path> Files;
-    int size = index_files(Files, disc_folder, space);
+int create_new_udp_socket(uint16_t port, string &addr, struct ip_mreq &group){
     /* zmienne i struktury opisujące gniazda */
     int sock, optval;
     struct sockaddr_in local_address{};
 
 
     /* zmienne obsługujące komunikację */
-    socklen_t len = sizeof(struct sockaddr_in);
 
     /* otworzenie gniazda */
     sock = socket(AF_INET, SOCK_DGRAM, 0);
@@ -317,11 +313,45 @@ int main(int argc, const char *argv[]) {
 //    optval = 0;
 //    if (setsockopt(sock, SOL_IP, IP_MULTICAST_LOOP, (void*)&optval, sizeof optval) < 0)
 //      syserr("setsockopt loop");
+return sock;
+}
 
 
+int main(int argc, const char *argv[]) {
+    struct ip_mreq group{};
+    uint64_t space;
+    string addr, disc_folder;
+    socklen_t len = sizeof(struct sockaddr_in);
+    struct sockaddr_in src_addr{};
+    timeout.tv_usec = 0;
+    SIMPL_CMD simple_cmd;
+    uint16_t port;
+
+    set_server_options(addr, port, space, disc_folder, timeout, argc, argv);
+    //index files in folder
+    std::vector<fs::path> Files;
+    int size = index_files(Files, disc_folder, space);
+
+    int sock = create_new_udp_socket(port, addr, group);
+    vector<future<remoteFile>> filesInProgress;
   /*czytanie wszystkiego z socketu UDP*/
   bool xd = true;
   do {
+      for(unsigned long i = 0; i < filesInProgress.size(); ++i) {
+          if (filesInProgress[i].wait_for(std::chrono::microseconds(10)) == std::future_status::ready) {
+              auto a = filesInProgress[i].get();
+              if (a.isSuccessful) {
+                  Files.push_back(fs::path(a.filename));
+              }
+              else{
+                  size -= a.size;
+                  cout <<"Error on downloading file\n";
+              }
+              std::swap(filesInProgress[i], filesInProgress.back());
+              filesInProgress.pop_back();
+              --i;
+          }
+      }
           CMPLX_CMD *abc;
           //TODO debug
           abc = (CMPLX_CMD *) &simple_cmd;
@@ -357,7 +387,7 @@ int main(int argc, const char *argv[]) {
               simple_cmd.data[recv_len-18] = '\0';
               send_file_list_packet(sock, src_addr, simple_cmd, Files);
           }
-          else if(strncmp(simple_cmd.cmd, "ADD", 10) != 0){
+          else if(strncmp(simple_cmd.cmd, "ADD", 10) == 0){
               cout << "Add..\n";
               abc->data[recv_len-26] = '\0';
               string fname (abc->data);
@@ -366,7 +396,8 @@ int main(int argc, const char *argv[]) {
                   send_no_way(fname, abc->cmd_seq, sock, src_addr);
               }
               else{
-                  receive_file(fname, sock, src_addr);
+                  auto t1 = std::async(std::launch::async, receive_file, file_size, fname, sock, src_addr);
+                  filesInProgress.push_back(std::move(t1));
               }
           }
           else if(strncmp(simple_cmd.cmd, "DEL", 10) == 0 ){

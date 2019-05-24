@@ -20,6 +20,12 @@ typedef struct __attribute__((__packed__)){
     char data[MAX_DATA_SIZE - sizeof(param)];
 }CMPLX_CMD;
 
+typedef struct{
+    bool isSuccessful;
+    uint64_t size;
+    std::string filename;
+}remoteFile;
+
 void set_cmd(char cmd[10], const std::string &message){
     unsigned long n = message.length();
     for(ulong i =0; i < n; i++){
