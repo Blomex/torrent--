@@ -10,6 +10,9 @@
 #include <arpa/inet.h>
 #include <boost/algorithm/string.hpp>
 #include <future>
+#include <boost/log/trivial.hpp>
+#include <fcntl.h>
+#include <random>
 #define N 100
 #define BUFFER_SIZE   2000
 #define QUEUE_LENGTH     5
@@ -24,6 +27,7 @@ using std::getline;
 using std::vector;
 using std::future;
 using std::cerr;
+using std::map;
 using namespace std::chrono;
 const string HELLO = "HELLO";
 const string GOOD_DAY = "GOOD_DAY";
@@ -33,15 +37,42 @@ const string CONNECT_ME = "CONNECT_ME";
 const string DEL = "DEL";
 const string ADD = "ADD";
 const string GET = "GET";
+namespace {
 uint64_t cmd_seq = 1;
 int timeout;
+string savedir;
+map<string, string> last_search;
+}
+//TODO może być w 1 pliku
+//TODO naprawić ścieżkę
+promise_message send_file_to_socket(int msg_sock, string file){
+    cout << file << "\n";
+    fs::path filePath(file);
+    std::ifstream file_stream{filePath.c_str(), std::ios::binary};
+    if(file_stream.is_open()){
+        char buffer[50000];
+        while(file_stream){
+            file_stream.read(buffer, 50000);
+            ssize_t len = file_stream.gcount();
+            if(write(msg_sock, buffer, len) != len){
+                return{false, ""};
+            }
+        }
+    }
+    else{
+        return {false, ""};
+    }
+    file_stream.close();
+    shutdown(msg_sock, SHUT_WR);
+    return {true, ""};
+}
+
 
 int prepare_to_send(SIMPL_CMD &packet, const char cmd[10], const string &data) {
     for (int i = 0; i < 10; i++) {
         packet.cmd[i] = cmd[i];
     }
     strncpy(packet.data, data.c_str(), sizeof(packet.data));
-
     packet.cmd_seq = htobe64(cmd_seq);
     return data.length() + sizeof(packet.cmd_seq) + sizeof(packet.cmd);
 }
@@ -60,6 +91,7 @@ void on_timeout(int timeout) {
 }
 
 void perform_search(const string &s, int sock, struct sockaddr_in &remote_address) {
+    last_search = map<string, string>();
     char cmd[10];
     set_cmd(cmd, LIST);
     SIMPL_CMD packet;
@@ -92,6 +124,7 @@ void perform_search(const string &s, int sock, struct sockaddr_in &remote_addres
             boost::split(result, p3.data, boost::is_any_of("\n"));
             for (string &str : result) {
                 cout << str << " (" << ip << ")\n";
+                last_search[str] = ip;
             }
         } else {
             cout << "[PCKG ERROR]  Skipping invalid package from " << ip << ":" << port << ".\n";
@@ -100,13 +133,149 @@ void perform_search(const string &s, int sock, struct sockaddr_in &remote_addres
 
 }
 
-void perform_fetch(string &s, int sock, struct sockaddr_in &remote_address) {
-    char cmd[10];
-    set_cmd(cmd, GET);
-    SIMPL_CMD packet;
-    int length = prepare_to_send(packet, cmd, s);
-    if (sendto(sock, &packet, length, 0, (struct sockaddr *) &remote_address, sizeof remote_address) != length)
-        syserr("sendto");
+int create_udp_socket(string &addr, uint16_t port, struct sockaddr_in &remote_address){
+struct sockaddr_in localSock;
+    struct timeval s_timeout{};
+    s_timeout.tv_usec = 10;
+    int sock = socket(PF_INET, SOCK_DGRAM, 0); // creating IPv4 UDP socket
+    if (sock < 0) {
+        syserr("socket");
+    }
+
+    //set timeout
+    if (setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (char *) &s_timeout, sizeof(s_timeout)) < 0) {
+        error give_me_a_name("setsockopt rcvtimeout\n");
+        close(sock);
+        exit(1);
+    }
+    /*
+    //activate bcast
+    int optval = 1;
+    if (setsockopt(sock, SOL_SOCKET, SO_BROADCAST, (void *) &optval, sizeof optval) < 0)
+        syserr("setsockopt broadcast");
+*/
+/* Enable SO_REUSEADDR to allow multiple instances of this */
+/* application to receive copies of the multicast datagrams. */
+/*
+    int reuse = 1;
+    if (setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, (char *) &reuse, sizeof(reuse)) < 0) {
+        syserr("secksockopt: reuse");
+    }*/
+
+    //binding port number with ip address
+    memset((char *) &localSock, 0, sizeof(localSock));
+    localSock.sin_addr.s_addr = htonl(INADDR_ANY); // listening on all interfaces
+    localSock.sin_port = htons(0); // listening on port PORT_NUM
+    localSock.sin_family = AF_INET; // IPv4
+
+    if (bind(sock, (struct sockaddr *) &localSock, sizeof(localSock)) < 0) {
+        syserr("bind");
+    }
+
+    /* ustawienie adresu i portu odbiorcy */
+    remote_address.sin_family = AF_INET;
+    remote_address.sin_port = htons(port);
+    if (inet_aton(addr.c_str(), &remote_address.sin_addr) == 0)
+        syserr("inet_aton");
+    return sock;
+}
+
+
+int create_tcp_socket(CMPLX_CMD message){
+    int sock;
+    struct sockaddr_in serveraddr{};
+    sock = socket(AF_INET, SOCK_STREAM, 0);//TCP
+    if(sock<0){
+        syserr("socket");
+    }
+    serveraddr.sin_family = AF_INET;
+    serveraddr.sin_addr.s_addr = htonl(INADDR_ANY);
+    serveraddr.sin_port = htons(static_cast<uint16_t>(be64toh(message.param)));
+    //timeout for accept
+    timeval timeout_tval;
+    timeout_tval.tv_sec = 2;
+    timeout_tval.tv_usec = 0;
+    sleep(1);
+    if (setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (char *) &timeout_tval, sizeof(timeout_tval)) < 0) {
+        error give_me_a_name("setsockopt rcvtimeout\n");
+        close(sock);
+        exit(1);
+    }
+    cout <<"PORT: "<< serveraddr.sin_port <<" real: "<< ntohs(serveraddr.sin_port) <<"\n";
+    //TODO zły timeout
+    if (setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, (char *) &timeout_tval, sizeof(timeout_tval)) < 0) {
+        error give_me_a_name("setsockopt sndtimeout\n");
+        close(sock);
+        exit(1);
+    }
+    if(connect(sock, (struct sockaddr*)&serveraddr, sizeof serveraddr) < 0){
+        syserr("connect");
+    }
+
+    return sock;
+}
+
+bool receive_file_from_socket(int tcp_socket, const char* file){
+    cout << file << "\n";
+    fs::path file_path( savedir + "/" +file);
+    fs::ofstream ofs(file_path, std::ofstream::binary);
+    char buffer[50000];
+    int length;
+    while((length = read(tcp_socket, buffer, sizeof(buffer))) > 0){
+        ofs.write(buffer, length);
+    }
+    if(length<0){
+        syserr("length");
+    }
+    ofs.close();
+    return length >= 0;
+}
+
+promise_message perform_fetch(string &s, struct sockaddr_in remote_address) {
+    //wybranie serwera z listy po ostatnim "search"
+    auto ip = last_search.find(s);
+    if(ip != last_search.end()) {
+        int msg_sock = create_udp_socket(ip->second, ntohs(remote_address.sin_port), remote_address);
+        char cmd[10];
+        set_cmd(cmd, GET);
+        SIMPL_CMD packet;
+        int length = prepare_to_send(packet, cmd, s);
+        if (sendto(msg_sock, &packet, length, 0, (struct sockaddr *) &remote_address, sizeof remote_address) != length)
+            syserr("sendto");
+        //czekamy na CONNECT_ME
+        socklen_t remote_len = sizeof(remote_address);
+        while (1) {
+            if (recvfrom(msg_sock, &packet, sizeof(SIMPL_CMD), 0, (struct sockaddr *) &remote_address, &remote_len)
+                < 0) {
+                //no answer = no file
+                continue;
+            }
+            CMPLX_CMD *answer = (CMPLX_CMD *) &packet;
+            if (strncmp(answer->cmd, "CONNECT_ME", 10) == 0 && be64toh(answer->cmd_seq) == cmd_seq) {
+                cout << "correct\n";
+                int tcp_sock = create_tcp_socket(*answer);
+                promise_message status = receive_file_from_socket(tcp_sock, ip->first.c_str());
+                char port[20];
+                sprintf(port, "%u", ntohs(remote_address.sin_port));
+                if(status.isSuccessful){
+                    status.message = "File " + s + " downloaded (" + inet_ntoa(remote_address.sin_addr) + ":" + port + ")\n";
+                }
+                else{
+                    status.message = "File " + s + " download failed (" + inet_ntoa(remote_address.sin_addr) + ":" + port + ")" + status.message;
+                }
+                return status;
+            }
+            else if(!be64toh(answer->cmd_seq) == cmd_seq){
+
+            }
+            else {
+                return;
+            }
+        }
+    }
+    else{
+
+    }
 
 }
 
@@ -143,102 +312,73 @@ void perform_discover(int sock, struct sockaddr_in &remote_address) {
             cout << "[PCKG ERROR]  Skipping invalid package from " << ip << ":" << port << ".\n";
         }
     }
-
 }
 
-void create_udp_socket(int &sock, string &addr, int port, struct sockaddr_in &localSock, struct sockaddr_in &remote_address){
-    struct timeval s_timeout{};
-    s_timeout.tv_usec = 10;
-    sock = socket(PF_INET, SOCK_DGRAM, 0); // creating IPv4 UDP socket
-    if (sock < 0) {
-        syserr("socket");
+void perform_remove(string &name, int sock, struct sockaddr_in &remote_address){
+    struct sockaddr_in debug = remote_address;
+    remote_address = debug;
+    SIMPL_CMD packet;
+    int length = prepare_to_send(packet, "DEL", name);
+    if (sendto(sock, &packet, length, 0, (struct sockaddr *) &remote_address, sizeof remote_address) != length)
+        syserr("sendto");
+}
+promise_message send_add_and_wait_for_answer(int sock, string filename, struct sockaddr_in remote_address){
+    CMPLX_CMD add_packet;
+    SIMPL_CMD answer;
+    promise_message status;
+    CMPLX_CMD *complex_answer = (CMPLX_CMD*)&answer;
+    set_cmd(add_packet.cmd, "ADD");
+    int size = prepare_to_send_param(add_packet, fs::file_size(filename), filename);
+    if(sendto(sock, &add_packet, size, 0, (struct sockaddr*) &remote_address, sizeof remote_address)!= size){
+        syserr("sendto");
     }
-
-    //set timeout
-    if (setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (char *) &s_timeout, sizeof(s_timeout)) < 0) {
-        error give_me_a_name("setsockopt rcvtimeout\n");
+    socklen_t len = sizeof(remote_address);
+    //TODO zwiekszyc timeout - w tej chwili jest smiesznie niski. Ewentualnie ta dziwna petla jak wczesniej
+    timeval t{timeout, 0};
+    if (setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (char *)&t, sizeof(t)) < 0) {
+        syserr("so receive");
         close(sock);
         exit(1);
     }
-    //activate bcast
-    int optval = 1;
-    if (setsockopt(sock, SOL_SOCKET, SO_BROADCAST, (void *) &optval, sizeof optval) < 0)
-        syserr("setsockopt broadcast");
-
-/* Enable SO_REUSEADDR to allow multiple instances of this */
-/* application to receive copies of the multicast datagrams. */
-    int reuse = 1;
-    if (setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, (char *) &reuse, sizeof(reuse)) < 0) {
-        syserr("secksockopt: reuse");
+    int received = recvfrom(sock, &answer, sizeof(answer), 0, (struct sockaddr*)&remote_address, &len);
+    if(strcmp("CAN_ADD", answer.cmd) == 0){
+        //TODO polacz sie i wysylaj plik
+        cout <<"CAN ADD received.. waiting for connection boys\n";
+        complex_answer->data[received-26] = '\0';
+        int msg_sock = create_tcp_socket(*complex_answer);
+        status = send_file_to_socket(msg_sock, filename);
+        char port[20];
+        sprintf(port, "%u", ntohs(remote_address.sin_port));
+        if(status.isSuccessful){
+            status.message = "File "+ filename + " uploaded (" + inet_ntoa(remote_address.sin_addr) + ":" + port + ")\n";
+        }
+        else{
+            status.message = "File "+ filename + " uploading failed (" + inet_ntoa(remote_address.sin_addr) + ":" + port + ")\n" + status.message;
+        }
+        return status;
     }
-
-    //binding port number with ip address
-    memset((char *) &localSock, 0, sizeof(localSock));
-    localSock.sin_addr.s_addr = htonl(INADDR_ANY); // listening on all interfaces
-    localSock.sin_port = htons(0); // listening on port PORT_NUM
-    localSock.sin_family = AF_INET; // IPv4
-
-    if (bind(sock, (struct sockaddr *) &localSock, sizeof(localSock)) < 0) {
-        syserr("bind");
+    else if(strcmp("NO_WAY", answer.cmd)){
+        answer.data[received-18] = '\0';
+        return {false, ""};
     }
-
-    /* ustawienie adresu i portu odbiorcy */
-    remote_address.sin_family = AF_INET;
-    remote_address.sin_port = htons(port);
-    if (inet_aton(addr.c_str(), &remote_address.sin_addr) == 0)
-        syserr("inet_aton");
+    return {false, ""};
 }
 
-int create_tcp_socket(CMPLX_CMD message){
-
-    int sock;
-    struct sockaddr_in serveraddr{};
-    sock = socket(AF_INET, SOCK_STREAM, 0);//TCP
-    if(sock<0){
-        syserr("socket");
-    }
-    serveraddr.sin_family = AF_INET;
-    serveraddr.sin_addr.s_addr = htonl(INADDR_ANY);
-    serveraddr.sin_port = htons(static_cast<uint16_t>(message.param));
-    //timeout for accept
-    if (setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (char *) &timeout, sizeof(timeout)) < 0) {
-        error give_me_a_name("setsockopt rcvtimeout\n");
-        close(sock);
-        exit(1);
-    }
-    if (setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, (char *) &timeout, sizeof(timeout)) < 0) {
-        error give_me_a_name("setsockopt sndtimeout\n");
-        close(sock);
-        exit(1);
-    }
-    if(connect(sock, (struct sockaddr*)&serveraddr, sizeof serveraddr) < 0){
-        syserr("connect");
-    }
-
-    socklen_t server_sock_len = sizeof serveraddr;
-    if(getsockname(sock, (struct sockaddr*) &serveraddr, &server_sock_len)<0){
-        syserr("getsockname");
-    }
-    return sock;
-}
-
-void perform_upload(string &filename, string &addr, int port, struct sockaddr_in remote_address) {
+promise_message perform_upload(string &filename, string &addr, int port, struct sockaddr_in remote_address) {
     //discover servers first
     //create new socket to discover
     vector<std::pair<uint64_t, string>> servers;
     fs::path file = filename.c_str();
     if(!fs::exists(file)){
-        string err = "File "+ fs::current_path().string() +" does not exist\n";
-        cout <<err;
+        string err = "File "+ fs::current_path().string() + filename + " does not exist\n";
+        return{false, err};
     }
 
     //Znajduje serwery
-    struct sockaddr_in local{};
-    int sock;
-    create_udp_socket(sock, addr, port, local, remote_address);
-    CMPLX_CMD packet;
-    set_cmd(packet.cmd, "ADD");
-    int length = prepare_to_send_param(packet, 1, filename);
+    int sock = create_udp_socket(addr, port, remote_address);
+    SIMPL_CMD packet;
+    set_cmd(packet.cmd, "HELLO");
+    int length = prepare_to_send(packet, packet.cmd, filename);
     if (sendto(sock, &packet, length, 0, (struct sockaddr *) &remote_address, sizeof remote_address) != length)
         syserr("sendto");
 
@@ -264,28 +404,25 @@ void perform_upload(string &filename, string &addr, int port, struct sockaddr_in
             uint64_t freeSpace =  be64toh(p3.param);
             servers.push_back(std::make_pair(freeSpace, ip));
             cout << "found \n";
-        } else {
-            //niepotrzebne - to jest nasz prywatny pakiet którego klient nie musi widzieć
-            //cout << "[PCKG ERROR]  Skipping invalid package from " << ip << ":" << port << ".\n";
         }
     }
-
+    promise_message result;
     //TODO teraz szukamy serwer i wysyłamy zapytania, oczekując na odpowiedź "NO_WAY" albo "CAN_ADD"
     std::sort(servers.begin(), servers.end(), std::greater<>());
     for(auto &serv: servers){
         if(serv.first < fs::file_size(file)){
+            result = {false, ""};
             break;
         }
-        //Send "ADD" and wait for answer
-        CMPLX_CMD add_packet;
-        set_cmd(add_packet.cmd, "ADD");
-        int size = prepare_to_send_param(add_packet, fs::file_size(file), filename);
-//TODO wszystko
+        result = send_add_and_wait_for_answer(sock, file.string(), remote_address);
+        if(result.isSuccessful){
+            break;
+        }
     }
-
+    return result;
 }
 
-void set_options(int argc, const char * argv[], string &addr, uint16_t &port, string &savedir, int &timeout){
+void set_options(int argc, const char * argv[], string &addr, uint16_t &port, int &timeout){
     try {
         options_description desc{"Options"};
         desc.add_options()
@@ -313,19 +450,24 @@ void set_options(int argc, const char * argv[], string &addr, uint16_t &port, st
     cout << "ready to read: \n";
 }
 
+void init_cmd_seq(){
+    std::random_device dev;
+    std::mt19937_64 rng(dev());
+    std::uniform_int_distribution<std::mt19937_64::result_type> dist(0, 18446744073709551615ULL);
+    cmd_seq = dist(rng);
+}
 
 int main(int argc, const char *argv[]) {
+    init_cmd_seq();
     cout << sizeof(CMPLX_CMD) << " "<< sizeof(SIMPL_CMD) << "\n";
     struct timeval s_timeout{};
     s_timeout.tv_usec = 10;
     s_timeout.tv_sec = 0;
     uint16_t port;
     string addr, savedir;
-    set_options(argc, argv, addr, port, savedir, timeout);
+    set_options(argc, argv, addr, port, timeout);
 
     string command, param, line;
-    //TODO get ready with shit
-    //server variables
     struct sockaddr_in localSock{};
     struct sockaddr_in remote_address{};
     int sock = socket(PF_INET, SOCK_DGRAM, 0); // creating IPv4 UDP socket
@@ -361,9 +503,7 @@ int main(int argc, const char *argv[]) {
         syserr("bind");
     }
 
-
     /* ustawienie adresu i portu odbiorcy */
-
     remote_address.sin_family = AF_INET;
     remote_address.sin_port = htons(port);
     if (inet_aton(addr.c_str(), &remote_address.sin_addr) == 0)
@@ -381,18 +521,13 @@ int main(int argc, const char *argv[]) {
         if (!(iss >> b)) {
             //only discover, exit, search are OK
             if (a == "discover") {
-                //TODO discover
-                cout << a;
                 perform_discover(sock, remote_address);
             } else if (a == "exit") {
                 exit(0);
             } else if (a == "search") {
-                //TODO search
-                cout << "performing search..\n";
                 string s = b;
                 perform_search(s, sock, remote_address);
             } else {
-                //TODO remove
                 cerr << a << " is unrecognized command or requires parameter\n";
             }
         } else {
@@ -401,19 +536,19 @@ int main(int argc, const char *argv[]) {
                 b += " " + c;
             }
             if (a == "fetch") {
-                //TODO fetch
-                perform_fetch(b, sock, remote_address);
+                perform_fetch(b, remote_address);
             } else if (a == "search") {
-                //TODO search with argument
                 perform_search(b, sock, remote_address);
             } else if (a == "upload") {
-                //TODO upload
+               // perform_upload(b, addr, port, remote_address);
                 auto t1 = std::async(std::launch::async, perform_upload, std::ref(b), std::ref(addr), port, std::ref(remote_address));
+               auto res =  t1.get();
+               cout << res.message;
+            } else if(a == "remove") {
+              perform_remove(b, sock, remote_address);
             } else {
-                //TODO remove
                 cerr << a << " is unrecognized command or requires to be without parameters\n";
             }
-            //only fetch, search, upload are correct
         }
     }
 

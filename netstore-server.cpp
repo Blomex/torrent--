@@ -13,6 +13,8 @@
 #include <fcntl.h>
 #include <boost/algorithm/string.hpp>
 #include <future>
+#include <boost/log/trivial.hpp>
+
 using namespace boost::program_options;
 namespace fs = boost::filesystem;
 using namespace boost::algorithm;
@@ -23,20 +25,24 @@ using std::cin;
 using std::string;
 using std::getline;
 using std::future;
+using std::map;
 #define BSIZE         256
 #define TTL_VALUE     4
 #define REPEAT_COUNT  8
 #define SLEEP_TIME    1
 #define MAX_POOL 128
+namespace {
 uint64_t size;
 struct timeval timeout;
+string addr, disc_folder;
+}
 void on_timeout(int timeout){
     if(timeout> 300 || timeout <= 0){
         throw std::invalid_argument("Timeout value specified by -t or --TIMEOUT must be between 1 and 300");
     }
 }
 //DZIALA
-void set_server_options(string &addr, uint16_t &port, uint64_t &space, string &disc_folder, struct timeval &timeout, int argc, const char *argv[]){
+void set_server_options(uint16_t &port, uint64_t &space, struct timeval &timeout, int argc, const char *argv[]){
     try {
         options_description desc{"Options"};
         desc.add_options()
@@ -105,7 +111,7 @@ void send_file_list_packet(int sock, struct sockaddr_in dest, SIMPL_CMD &receive
 //DZIALA
 uint64_t index_files(vector<fs::path> &Files, string &disc_folder, uint64_t space){
     cout <<"Indexing files in "<<fs::directory_entry(disc_folder) << " ...\n";
-    int spaceTaken = 0;
+    uint64_t spaceTaken = 0;
     try {
         for (auto &p: fs::directory_iterator(disc_folder)) {
             if (fs::is_regular(p)) {
@@ -121,13 +127,14 @@ uint64_t index_files(vector<fs::path> &Files, string &disc_folder, uint64_t spac
     }
     cout << "Indexing complete, total size: " << spaceTaken << "\n";
     cout << "Free size left: ";
-    size = space - spaceTaken;
+    size =  space > spaceTaken ? space - spaceTaken : 0;
     cout << size << "\n";
     return size;
 }
 
 //timeout same as timeout given in arguments
 int create_new_tcp_socket(uint16_t &port){
+  //  BOOST_LOG_TRIVIAL(trace) << "creating TCP";
     int sock;
     struct sockaddr_in serveraddr{};
     sock = socket(AF_INET, SOCK_STREAM, 0);//TCP
@@ -138,14 +145,19 @@ int create_new_tcp_socket(uint16_t &port){
     serveraddr.sin_addr.s_addr = htonl(INADDR_ANY);
     serveraddr.sin_port = htons(0);
     //timeout for accept
-    if (setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (char *) &timeout, sizeof(timeout)) < 0) {
+
+    timeval timeout_tval;
+    timeout_tval.tv_sec = 10;
+    timeout_tval.tv_usec = 0;
+    if (setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (char *) &timeout_tval, sizeof(timeout_tval)) < 0) {
         error give_me_a_name("setsockopt rcvtimeout\n");
-        shutdown(sock, SHUT_WR);
+        close(sock);
         exit(1);
     }
-    if (setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, (char *) &timeout, sizeof(timeout)) < 0) {
+    //TODO zły timeout
+    if (setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, (char *) &timeout_tval, sizeof(timeout_tval)) < 0) {
         error give_me_a_name("setsockopt sndtimeout\n");
-        shutdown(sock, SHUT_WR);
+        close(sock);
         exit(1);
     }
 
@@ -157,53 +169,55 @@ int create_new_tcp_socket(uint16_t &port){
     if(getsockname(sock, (struct sockaddr*) &serveraddr, &server_sock_len)<0){
         syserr("getsockname");
     }
+    cout <<"PORT: "<< serveraddr.sin_port <<" real: "<< ntohs(serveraddr.sin_port) <<"\n";
+    sleep(1);
     port = ntohs(serveraddr.sin_port);
     return sock;
 }
 //chyba dziala
-void send_can_add(string &file, uint16_t port, struct sockaddr_in client, int main_sock){
+bool send_can_add(string &file, uint16_t port, struct sockaddr_in client, int main_sock){
     CMPLX_CMD complex;
     set_cmd(complex.cmd, "CAN_ADD");
     complex.param = htobe64(uint64_t(port));
     strncpy(complex.data, file.c_str(), file.length());
     ssize_t size_to_send = 26 + file.length();
     if(sendto(main_sock, &complex, static_cast<size_t>(size_to_send), 0 , (struct sockaddr*)&client, sizeof(client)) != size_to_send){
-        syserr("partial sendto");
+        return false;
     }
+    return true;
 }
 //DZIALA
-void receive_file_from_socket(int fd, string &file){
-    fs::ofstream ofs(fs::path{file}, std::ofstream::binary);
-    char buffer[50];
-    int size = 50;
-    int bytes = 1;
-    while(bytes != 0){
-        bytes = read(fd, buffer, size);
-        ofs.write(buffer, bytes);
+
+bool receive_file_from_socket(int tcp_socket, const char* file){
+    struct sockaddr_in source_address{};
+    memset(&source_address, 0, sizeof(source_address));
+    socklen_t len = sizeof(source_address);
+    int sock = accept(tcp_socket, (struct sockaddr*)&source_address, &len);
+    fs::path file_path(disc_folder + "/" +file);
+    fs::ofstream ofs(file_path, std::ofstream::binary);
+    char buffer[50000];
+    int length;
+    while((length = read(sock, buffer, sizeof(buffer))) > 0){
+        ofs.write(buffer, length);
     }
     ofs.close();
-    close(fd);
+    if(close(sock)<0){
+        syserr("close");
+    }
+    return length >= 0;
 }
-//chyba dziala
-remoteFile receive_file(string &file, int main_sock, struct sockaddr_in client){
-    struct sockaddr_in private_client{};
-    socklen_t client_address_len = sizeof(private_client);
+remote_file receive_file(uint64_t file_size, string file, int main_sock, struct sockaddr_in client){
     uint16_t port;
     int sock = create_new_tcp_socket(port);
-    //send "can add"
-    send_can_add(file, port, client, main_sock);
-    //now accept connection
-    int msg_sock = accept(sock, (struct sockaddr*)&private_client,  &client_address_len);
-    if(msg_sock<0){
-        close(msg_sock);
-        close(sock);
-        //TODO fix
-        return{false, 0, ""};
+    if(sock < 0){
+        return {false, file_size, file};
     }
-    //connection accepted, we can read file from socket and save it
-    fs::ofstream stream(file, std::ios::binary);
-    //TODO receive bytes from TCP socket and write them to stream
-    receive_file_from_socket(msg_sock, file);
+    if(!send_can_add(file, port, client, main_sock)){
+        return {false, file_size, file};
+    }
+    if(!receive_file_from_socket(sock, file.c_str())){
+        return {false, file_size, file};
+    }
     return {true, fs::file_size(file), file};
 }
 void send_connect_me(string &file, uint16_t port, struct sockaddr_in client, int main_sock){
@@ -218,21 +232,26 @@ void send_connect_me(string &file, uint16_t port, struct sockaddr_in client, int
 
 }
 
-void send_file_to_socket(int msg_sock, string &file){
-    //TODO czy na pewno tak?
-    fs::path filePath{file};
-    std::ifstream ifs(filePath.c_str(), std::ios::binary);
-    char buffer[50];
-    if(ifs){
-        ifs.read(buffer, size);
-        std::streamsize bytes = ifs.gcount();
-        if(write(msg_sock, &buffer, bytes)!= bytes){
-            syserr("partial/failed write");
+void send_file_to_socket(int msg_sock, string file){
+    cout << file << "\n";
+    fs::path filePath(disc_folder + "/" + file);
+    std::ifstream file_stream{filePath.c_str(), std::ios::binary};
+    if(file_stream.is_open()){
+        char buffer[50000];
+        while(file_stream){
+            file_stream.read(buffer, 50000);
+            ssize_t len = file_stream.gcount();
+            if(write(msg_sock, buffer, len) != len){
+                syserr("partial write");
+            }
         }
     }
-    ifs.close();
-    close(msg_sock);
-
+    else{
+        std::cerr << "File opening error";
+    }
+    file_stream.close();
+    cout << "Whole file sent\n";
+    shutdown(msg_sock, SHUT_WR);
 }
 
 void send_file(string &file, int main_sock, struct sockaddr_in client){
@@ -242,6 +261,7 @@ void send_file(string &file, int main_sock, struct sockaddr_in client){
     int sock = create_new_tcp_socket(port);
     send_connect_me(file, port, client, main_sock);
     //now wait for accept for timeout seconds.
+    cout <<"before accept\n";
     int msg_sock = accept(sock, (struct sockaddr*)&private_client,  &client_address_len);
     if(msg_sock<0){
         perror("accept");
@@ -249,6 +269,7 @@ void send_file(string &file, int main_sock, struct sockaddr_in client){
         close(sock);
         return;
     }
+    cout <<"After accept\n";
     //we accepted so we can send now
     //send file
     send_file_to_socket(msg_sock, file);
@@ -260,7 +281,8 @@ void send_no_way(string &fname, uint64_t cmd_seq, int sock, struct sockaddr_in s
     answer.cmd_seq = cmd_seq;
     strcpy(answer.data, fname.c_str());
     int size = strlen(answer.data) + 18;
-    if(sendto(sock, &answer, size, 0, (struct sockaddr*)&src_addr, sizeof src_addr)){
+    // we dont care if
+    if(sendto(sock, &answer, size, 0, (struct sockaddr*)&src_addr, sizeof src_addr)!= size){
         syserr("sendto");
     }
 }
@@ -320,25 +342,25 @@ return sock;
 int main(int argc, const char *argv[]) {
     struct ip_mreq group{};
     uint64_t space;
-    string addr, disc_folder;
     socklen_t len = sizeof(struct sockaddr_in);
     struct sockaddr_in src_addr{};
     timeout.tv_usec = 0;
     SIMPL_CMD simple_cmd;
     uint16_t port;
 
-    set_server_options(addr, port, space, disc_folder, timeout, argc, argv);
+    set_server_options(port, space, timeout, argc, argv);
     //index files in folder
     std::vector<fs::path> Files;
     int size = index_files(Files, disc_folder, space);
 
     int sock = create_new_udp_socket(port, addr, group);
-    vector<future<remoteFile>> filesInProgress;
+    vector<future<remote_file>> filesInProgress;
   /*czytanie wszystkiego z socketu UDP*/
   bool xd = true;
   do {
       for(unsigned long i = 0; i < filesInProgress.size(); ++i) {
-          if (filesInProgress[i].wait_for(std::chrono::microseconds(10)) == std::future_status::ready) {
+          if (filesInProgress[i].wait_for(std::chrono::microseconds(0)) == std::future_status::ready) {
+              cout << "xd found";
               auto a = filesInProgress[i].get();
               if (a.isSuccessful) {
                   Files.push_back(fs::path(a.filename));
@@ -350,6 +372,9 @@ int main(int argc, const char *argv[]) {
               std::swap(filesInProgress[i], filesInProgress.back());
               filesInProgress.pop_back();
               --i;
+          }
+          else{
+              cout <<"not found";
           }
       }
           CMPLX_CMD *abc;
@@ -374,7 +399,8 @@ int main(int argc, const char *argv[]) {
               //TODO CONNECT ME
               simple_cmd.data[recv_len-18]='\0';
               string filename = simple_cmd.data;
-              if(std::find(Files.begin(), Files.end(), fs::path{filename}) == Files.end()){
+              auto debug = Files;
+              if(std::find(Files.begin(), Files.end(), fs::path{disc_folder + "/" + filename}) == Files.end()){
                   //TODO powinien byc simple a nie complex
                   send_no_way(filename,simple_cmd.cmd_seq, sock, src_addr);
               }
@@ -392,10 +418,12 @@ int main(int argc, const char *argv[]) {
               abc->data[recv_len-26] = '\0';
               string fname (abc->data);
               int64_t file_size = be64toh(abc->param);
-              if (strcmp(abc->data, "")==0 || fname.find('/')!= string::npos || file_size > size){
+              if ((strcmp(abc->data, "")==0 || fname.find('/')!= string::npos || file_size > size || (fs::exists(fs::path(disc_folder + "/" + abc->data))))){
+                  cout << "sending no way..\n";
                   send_no_way(fname, abc->cmd_seq, sock, src_addr);
               }
               else{
+                 // receive_file(fname, sock, src_addr);
                   auto t1 = std::async(std::launch::async, receive_file, file_size, fname, sock, src_addr);
                   filesInProgress.push_back(std::move(t1));
               }
@@ -404,8 +432,8 @@ int main(int argc, const char *argv[]) {
               cout << "Delete..\n";
               simple_cmd.data[recv_len-18] = '\0';
               //delete file
-              for (auto &f: Files){
-                  if(strcmp(f.filename().c_str(), simple_cmd.data) == 0){
+              for (auto &f: Files){// TODO FIX
+                  if(strcmp(f.filename().c_str(), string(disc_folder + "/" + string(simple_cmd.data)).c_str()) == 0){
                       try {
                           fs::remove(f);
                           break;

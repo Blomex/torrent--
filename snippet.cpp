@@ -7,18 +7,22 @@
 #include <iostream>
 #include <fcntl.h>
 namespace fs = boost::filesystem;
-
+#include <string>
+using std::string;
 
 
 int main(){
 int fd = open("CMakeCache.txt", O_RDONLY);
-fs::path file("Makefile");
+fs::path file("Project.cbp");
+std::cout << fs::file_size("Makefile") << " xd \n";
 std::cout << fs::file_size(file) << "\n";
-fs::path newFile("Makefile3");
+string temp = "temp";
+string Mfile3 = "Makefile71";
+fs::path newFile(temp + "/" + Mfile3);
 fs::ifstream ifs(file, std::ifstream::binary);
-fs::ofstream ofs(newFile, std::ifstream::binary);
+fs::ofstream ofs(newFile, std::ios::binary);
 
-char buffer[50];
+char buffer[500000];
 int size = 50;
 int bytes = 1;
 while(bytes != 0){

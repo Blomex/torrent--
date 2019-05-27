@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.10)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_COMPILER g++)
-set(CMAKE_CXX_FLAGS "-Wall -Wextra -Werror -pthread")
+set(CMAKE_CXX_FLAGS "-Wall -Wextra -Werror -pthread -O0")
 FIND_PACKAGE( Boost 1.40 COMPONENTS program_options filesystem REQUIRED )
 set(CMAKE_THREAD_PREFER_PTHREAD On)
 FIND_PACKAGE(Threads REQUIRED)

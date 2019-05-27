@@ -24,7 +24,12 @@ typedef struct{
     bool isSuccessful;
     uint64_t size;
     std::string filename;
-}remoteFile;
+}remote_file;
+
+typedef struct{
+    bool isSuccessful;
+    std::string message;
+}promise_message;
 
 void set_cmd(char cmd[10], const std::string &message){
     unsigned long n = message.length();
