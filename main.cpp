@@ -13,6 +13,7 @@
 #include <boost/log/trivial.hpp>
 #include <fcntl.h>
 #include <random>
+#include <inttypes.h>
 #define N 100
 #define BUFFER_SIZE   2000
 #define QUEUE_LENGTH     5
@@ -28,17 +29,10 @@ using std::vector;
 using std::future;
 using std::cerr;
 using std::map;
+using std::to_string;
 using namespace std::chrono;
-const string HELLO = "HELLO";
-const string GOOD_DAY = "GOOD_DAY";
-const string LIST = "LIST";
-const string MY_LIST = "MY_LIST";
-const string CONNECT_ME = "CONNECT_ME";
-const string DEL = "DEL";
-const string ADD = "ADD";
-const string GET = "GET";
 namespace {
-uint64_t cmd_seq = 1;
+std::atomic<uint64_t> cmd_seq = 1;
 int timeout;
 string savedir;
 map<string, string> last_search;
@@ -73,13 +67,13 @@ int prepare_to_send(SIMPL_CMD &packet, const char cmd[10], const string &data) {
         packet.cmd[i] = cmd[i];
     }
     strncpy(packet.data, data.c_str(), sizeof(packet.data));
-    packet.cmd_seq = htobe64(cmd_seq);
+    packet.cmd_seq = htobe64(cmd_seq.fetch_add(1, std::memory_order_relaxed));
     return data.length() + sizeof(packet.cmd_seq) + sizeof(packet.cmd);
 }
 
 int prepare_to_send_param(CMPLX_CMD &packet, uint64_t param, const string &data) {
     strncpy(packet.data, data.c_str(), sizeof(packet.data));
-    packet.cmd_seq = cmd_seq;
+    packet.cmd_seq = cmd_seq.fetch_add(1, std::memory_order_relaxed);
     packet.param = htobe64(param);
     return data.length() + sizeof(packet.cmd_seq) + sizeof(packet.cmd) + sizeof(packet.param);
 }
@@ -93,7 +87,7 @@ void on_timeout(int timeout) {
 void perform_search(const string &s, int sock, struct sockaddr_in &remote_address) {
     last_search = map<string, string>();
     char cmd[10];
-    set_cmd(cmd, LIST);
+    set_cmd(cmd, "LIST");
     SIMPL_CMD packet;
 
     int length = prepare_to_send(packet, cmd, s);
@@ -119,7 +113,7 @@ void perform_search(const string &s, int sock, struct sockaddr_in &remote_addres
         //check if we got packet we are expecting
         int port = ntohs(server.sin_port);
         string ip = inet_ntoa(server.sin_addr);
-        if (strncmp(p3.cmd, "MY_LIST", 8) == 0 && be64toh(p3.cmd_seq) == cmd_seq) {
+        if (strncmp(p3.cmd, "MY_LIST", 8) == 0 && be64toh(p3.cmd_seq) == be64toh(packet.cmd_seq)) {
             vector<string> result;
             boost::split(result, p3.data, boost::is_any_of("\n"));
             for (string &str : result) {
@@ -215,7 +209,7 @@ int create_tcp_socket(CMPLX_CMD message){
     return sock;
 }
 
-bool receive_file_from_socket(int tcp_socket, const char* file){
+promise_message receive_file_from_socket(int tcp_socket, const char* file){
     cout << file << "\n";
     fs::path file_path( savedir + "/" +file);
     fs::ofstream ofs(file_path, std::ofstream::binary);
@@ -224,26 +218,26 @@ bool receive_file_from_socket(int tcp_socket, const char* file){
     while((length = read(tcp_socket, buffer, sizeof(buffer))) > 0){
         ofs.write(buffer, length);
     }
-    if(length<0){
-        syserr("length");
-    }
     ofs.close();
-    return length >= 0;
+    return {length >= 0, ""};
 }
 
-promise_message perform_fetch(string &s, struct sockaddr_in remote_address) {
+promise_message perform_fetch(string s, struct sockaddr_in remote_address) {
     //wybranie serwera z listy po ostatnim "search"
     auto ip = last_search.find(s);
     if(ip != last_search.end()) {
         int msg_sock = create_udp_socket(ip->second, ntohs(remote_address.sin_port), remote_address);
         char cmd[10];
-        set_cmd(cmd, GET);
+        set_cmd(cmd, "GET");
         SIMPL_CMD packet;
         int length = prepare_to_send(packet, cmd, s);
         if (sendto(msg_sock, &packet, length, 0, (struct sockaddr *) &remote_address, sizeof remote_address) != length)
             syserr("sendto");
         //czekamy na CONNECT_ME
         socklen_t remote_len = sizeof(remote_address);
+
+        char remote_port[20];
+        sprintf(remote_port, "%u", ntohs(remote_address.sin_port));
         while (1) {
             if (recvfrom(msg_sock, &packet, sizeof(SIMPL_CMD), 0, (struct sockaddr *) &remote_address, &remote_len)
                 < 0) {
@@ -251,37 +245,36 @@ promise_message perform_fetch(string &s, struct sockaddr_in remote_address) {
                 continue;
             }
             CMPLX_CMD *answer = (CMPLX_CMD *) &packet;
-            if (strncmp(answer->cmd, "CONNECT_ME", 10) == 0 && be64toh(answer->cmd_seq) == cmd_seq) {
+            if (strncmp(answer->cmd, "CONNECT_ME", 10) == 0 && answer->cmd_seq == packet.cmd_seq) {
+                char port[20];
+                sprintf(port, "%u", static_cast<uint16_t>(be64toh(answer->param)));
                 cout << "correct\n";
                 int tcp_sock = create_tcp_socket(*answer);
                 promise_message status = receive_file_from_socket(tcp_sock, ip->first.c_str());
-                char port[20];
-                sprintf(port, "%u", ntohs(remote_address.sin_port));
                 if(status.isSuccessful){
-                    status.message = "File " + s + " downloaded (" + inet_ntoa(remote_address.sin_addr) + ":" + port + ")\n";
+                    status.message = "File " + s + " downloaded (" + inet_ntoa(remote_address.sin_addr) + ":" + to_string(static_cast<uint16_t>(be64toh(answer->param))) + ")\n";
                 }
                 else{
-                    status.message = "File " + s + " download failed (" + inet_ntoa(remote_address.sin_addr) + ":" + port + ")" + status.message;
+                    status.message = "File " + s + " download failed (" + inet_ntoa(remote_address.sin_addr) + ":" + to_string(static_cast<uint16_t>(be64toh(answer->param))) + ")" + status.message;
                 }
                 return status;
             }
-            else if(!be64toh(answer->cmd_seq) == cmd_seq){
-
+            else if(answer->cmd_seq != packet.cmd_seq){
+                return{false, string("[PCKG ERROR] Skipping invalid package from ") + inet_ntoa(remote_address.sin_addr) + ":" + remote_port +". Invalid cmd_seq."+
+                "Expected " + to_string(be64toh(packet.cmd_seq)) + " instead of " + to_string(be64toh(answer->cmd_seq)) + "\n"};
             }
             else {
-                return;
+                return {false, string("[PCKG ERROR] Skipping invalid package from") + inet_ntoa(remote_address.sin_addr) + ":" + remote_port +". expected 'CONNECT_ME' instead\n"};
             }
         }
     }
-    else{
-
-    }
+    return{false, "File " + s + " download failed (" + inet_ntoa(remote_address.sin_addr) + ":" + "?????" + ")\n" };
 
 }
 
 void perform_discover(int sock, struct sockaddr_in &remote_address) {
     char cmd[10];
-    set_cmd(cmd, HELLO);
+    set_cmd(cmd, "HELLO");
     SIMPL_CMD packet;
     int length = prepare_to_send(packet, cmd, "");
 
@@ -306,10 +299,18 @@ void perform_discover(int sock, struct sockaddr_in &remote_address) {
         //check if we got packet we are expecting
         int port = ntohs(server.sin_port);
         string ip = inet_ntoa(server.sin_addr);
-        if (strncmp(p3.cmd, "GOOD_DAY", 7) == 0 && be64toh(p3.cmd_seq) == cmd_seq) {
+        char good_day[10];
+        set_cmd(good_day, "GOOD_DAY");
+        if (memcmp(p3.cmd, good_day, 10) == 0 && p3.cmd_seq == packet.cmd_seq) {
             cout << "Found " << ip << " (" << p3.data << ") with free space " << be64toh(p3.param) << "\n";
         } else {
-            cout << "[PCKG ERROR]  Skipping invalid package from " << ip << ":" << port << ".\n";
+            cout << "[PCKG ERROR]  Skipping invalid package from " << ip << ":" << port << ". ";
+            if(p3.cmd_seq != packet.cmd_seq){
+                cout << string("Invalid cmd_seq: Expected ")<< be64toh(packet.cmd_seq) << " instead of " << be64toh(p3.cmd_seq)<< "\n";
+            }
+            else{
+                cout << "Correct cmd_seq but invalid command: GOOD_DAY expected\n";
+            }
         }
     }
 }
@@ -348,7 +349,7 @@ promise_message send_add_and_wait_for_answer(int sock, string filename, struct s
         int msg_sock = create_tcp_socket(*complex_answer);
         status = send_file_to_socket(msg_sock, filename);
         char port[20];
-        sprintf(port, "%u", ntohs(remote_address.sin_port));
+        sprintf(port, "%u", static_cast<uint16_t>(be64toh(complex_answer->param)));
         if(status.isSuccessful){
             status.message = "File "+ filename + " uploaded (" + inet_ntoa(remote_address.sin_addr) + ":" + port + ")\n";
         }
@@ -357,20 +358,20 @@ promise_message send_add_and_wait_for_answer(int sock, string filename, struct s
         }
         return status;
     }
-    else if(strcmp("NO_WAY", answer.cmd)){
+    else if(strcmp("NO_WAY", answer.cmd) == 0){
         answer.data[received-18] = '\0';
-        return {false, ""};
+        return {false, "File " + filename + " is too big"};
     }
     return {false, ""};
 }
 
-promise_message perform_upload(string &filename, string &addr, int port, struct sockaddr_in remote_address) {
+promise_message perform_upload(string filename, string &addr, int port, struct sockaddr_in remote_address) {
     //discover servers first
     //create new socket to discover
     vector<std::pair<uint64_t, string>> servers;
     fs::path file = filename.c_str();
     if(!fs::exists(file)){
-        string err = "File "+ fs::current_path().string() + filename + " does not exist\n";
+        string err = "File "+ filename + " does not exist\n";
         return{false, err};
     }
 
@@ -378,7 +379,7 @@ promise_message perform_upload(string &filename, string &addr, int port, struct 
     int sock = create_udp_socket(addr, port, remote_address);
     SIMPL_CMD packet;
     set_cmd(packet.cmd, "HELLO");
-    int length = prepare_to_send(packet, packet.cmd, filename);
+    int length = prepare_to_send(packet, packet.cmd, file.filename().c_str());
     if (sendto(sock, &packet, length, 0, (struct sockaddr *) &remote_address, sizeof remote_address) != length)
         syserr("sendto");
 
@@ -400,18 +401,18 @@ promise_message perform_upload(string &filename, string &addr, int port, struct 
         p3.data[x - 26] = '\0';
         //check if we got packet we are expecting
         string ip = inet_ntoa(server.sin_addr);
-        if (strncmp(p3.cmd, "GOOD_DAY", 10) == 0 && be64toh(p3.cmd_seq) == cmd_seq) {
+        if (strncmp(p3.cmd, "GOOD_DAY", 10) == 0 && p3.cmd_seq == packet.cmd_seq) {
             uint64_t freeSpace =  be64toh(p3.param);
             servers.push_back(std::make_pair(freeSpace, ip));
             cout << "found \n";
         }
     }
-    promise_message result;
+    promise_message result{false, ""};
     //TODO teraz szukamy serwer i wysyłamy zapytania, oczekując na odpowiedź "NO_WAY" albo "CAN_ADD"
     std::sort(servers.begin(), servers.end(), std::greater<>());
     for(auto &serv: servers){
         if(serv.first < fs::file_size(file)){
-            result = {false, ""};
+            result = {false, "File " + filename + " too big\n"};
             break;
         }
         result = send_add_and_wait_for_answer(sock, file.string(), remote_address);
@@ -419,6 +420,7 @@ promise_message perform_upload(string &filename, string &addr, int port, struct 
             break;
         }
     }
+    //
     return result;
 }
 
@@ -455,6 +457,21 @@ void init_cmd_seq(){
     std::mt19937_64 rng(dev());
     std::uniform_int_distribution<std::mt19937_64::result_type> dist(0, 18446744073709551615ULL);
     cmd_seq = dist(rng);
+}
+vector<future<promise_message>> filesInProgress;
+void check_for_promises(){
+    for(unsigned long i = 0; i < filesInProgress.size(); ++i) {
+        if (filesInProgress[i].wait_for(std::chrono::microseconds(0)) == std::future_status::ready) {
+            auto a = filesInProgress[i].get();
+            cout << a.message;
+            std::swap(filesInProgress[i], filesInProgress.back());
+            filesInProgress.pop_back();
+            --i;
+        }
+        else{
+            cout <<"promise: " << i << "not found\n";
+        }
+    }
 }
 
 int main(int argc, const char *argv[]) {
@@ -511,6 +528,7 @@ int main(int argc, const char *argv[]) {
 
 
     while (getline(cin, line)) {
+        check_for_promises();
         string a, b;
         std::istringstream iss(line);
         if (!(iss >> a)) {
@@ -525,8 +543,7 @@ int main(int argc, const char *argv[]) {
             } else if (a == "exit") {
                 exit(0);
             } else if (a == "search") {
-                string s = b;
-                perform_search(s, sock, remote_address);
+                perform_search(b, sock, remote_address);
             } else {
                 cerr << a << " is unrecognized command or requires parameter\n";
             }
@@ -536,20 +553,22 @@ int main(int argc, const char *argv[]) {
                 b += " " + c;
             }
             if (a == "fetch") {
-                perform_fetch(b, remote_address);
+               // perform_fetch(b, remote_address);
+                filesInProgress.push_back(std::async(std::launch::async, perform_fetch, b, remote_address));
             } else if (a == "search") {
                 perform_search(b, sock, remote_address);
             } else if (a == "upload") {
                // perform_upload(b, addr, port, remote_address);
-                auto t1 = std::async(std::launch::async, perform_upload, std::ref(b), std::ref(addr), port, std::ref(remote_address));
-               auto res =  t1.get();
-               cout << res.message;
+                filesInProgress.push_back(std::async(std::launch::async, perform_upload, b, std::ref(addr), port, std::ref(remote_address)));
+               //auto res =  t1.get();
+             //  cout << res.message;
             } else if(a == "remove") {
               perform_remove(b, sock, remote_address);
             } else {
                 cerr << a << " is unrecognized command or requires to be without parameters\n";
             }
         }
+        check_for_promises();
     }
 
     return 0;

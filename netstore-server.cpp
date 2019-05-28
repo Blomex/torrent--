@@ -175,12 +175,11 @@ int create_new_tcp_socket(uint16_t &port){
     return sock;
 }
 //chyba dziala
-bool send_can_add(string &file, uint16_t port, struct sockaddr_in client, int main_sock){
+bool send_can_add(uint16_t port, struct sockaddr_in client, int main_sock){
     CMPLX_CMD complex;
     set_cmd(complex.cmd, "CAN_ADD");
     complex.param = htobe64(uint64_t(port));
-    strncpy(complex.data, file.c_str(), file.length());
-    ssize_t size_to_send = 26 + file.length();
+    ssize_t size_to_send = 26;
     if(sendto(main_sock, &complex, static_cast<size_t>(size_to_send), 0 , (struct sockaddr*)&client, sizeof(client)) != size_to_send){
         return false;
     }
@@ -212,7 +211,7 @@ remote_file receive_file(uint64_t file_size, string file, int main_sock, struct 
     if(sock < 0){
         return {false, file_size, file};
     }
-    if(!send_can_add(file, port, client, main_sock)){
+    if(!send_can_add(port, client, main_sock)){
         return {false, file_size, file};
     }
     if(!receive_file_from_socket(sock, file.c_str())){
@@ -220,16 +219,16 @@ remote_file receive_file(uint64_t file_size, string file, int main_sock, struct 
     }
     return {true, fs::file_size(file), file};
 }
-void send_connect_me(string &file, uint16_t port, struct sockaddr_in client, int main_sock){
+void send_connect_me(string &file, uint16_t port, struct sockaddr_in client, int main_sock, uint64_t cmd_seq){
     CMPLX_CMD complex;
     set_cmd(complex.cmd, "CONNECT_ME");
     complex.param = htobe64(uint64_t(port));
+    complex.cmd_seq = cmd_seq;
     strncpy(complex.data, file.c_str(), file.length());
     int size_to_send = 26 + file.length();
     if(sendto(main_sock, (char*)&complex, size_to_send,0 , (struct sockaddr*)&client, sizeof(client)) != size_to_send){
         syserr("partial sendto");
     }
-
 }
 
 void send_file_to_socket(int msg_sock, string file){
@@ -254,12 +253,12 @@ void send_file_to_socket(int msg_sock, string file){
     shutdown(msg_sock, SHUT_WR);
 }
 
-void send_file(string &file, int main_sock, struct sockaddr_in client){
+void send_file(string &file, int main_sock, struct sockaddr_in client, uint64_t cmd_seq){
     uint16_t port;
     struct sockaddr_in private_client{};
     socklen_t client_address_len = sizeof(private_client);
     int sock = create_new_tcp_socket(port);
-    send_connect_me(file, port, client, main_sock);
+    send_connect_me(file, port, client, main_sock, cmd_seq);
     //now wait for accept for timeout seconds.
     cout <<"before accept\n";
     int msg_sock = accept(sock, (struct sockaddr*)&private_client,  &client_address_len);
@@ -355,36 +354,37 @@ int main(int argc, const char *argv[]) {
 
     int sock = create_new_udp_socket(port, addr, group);
     vector<future<remote_file>> filesInProgress;
+    char HELLO[10], GET[10], LIST[10], ADD[10], DEL[10];
+    set_cmd(HELLO, "HELLO");
+    set_cmd(GET, "GET");
+    set_cmd(LIST, "LIST");
+    set_cmd(ADD, "ADD");
+    set_cmd(DEL, "DEL");
   /*czytanie wszystkiego z socketu UDP*/
   bool xd = true;
   do {
       for(unsigned long i = 0; i < filesInProgress.size(); ++i) {
           if (filesInProgress[i].wait_for(std::chrono::microseconds(0)) == std::future_status::ready) {
-              cout << "xd found";
               auto a = filesInProgress[i].get();
               if (a.isSuccessful) {
                   Files.push_back(fs::path(a.filename));
               }
               else{
                   size -= a.size;
-                  cout <<"Error on downloading file\n";
               }
               std::swap(filesInProgress[i], filesInProgress.back());
               filesInProgress.pop_back();
               --i;
           }
-          else{
-              cout <<"not found";
-          }
       }
           CMPLX_CMD *abc;
           //TODO debug
           abc = (CMPLX_CMD *) &simple_cmd;
-          simple_cmd.cmd_seq = 6666;
           memset(&src_addr, 0, sizeof(src_addr));
           ssize_t recv_len = recvfrom(sock, &simple_cmd, sizeof simple_cmd, 0, (struct sockaddr *) &src_addr, &len);
-          if (strncmp(simple_cmd.cmd, "HELLO", 5) == 0) {
-              cout << "WE GOT HELLO, WOAH\n";
+          //TODO debug
+          //has to be memcmp because correct packet is 'HELLO\0\0\0\0\0' and 'HELLO\0\0\0\0a' etc should be skipped
+          if (memcmp(HELLO, simple_cmd.cmd, 10) == 0) {
               CMPLX_CMD complex;
               complex.cmd_seq = simple_cmd.cmd_seq;
               complex.param = htobe64(size);
@@ -395,47 +395,43 @@ int main(int argc, const char *argv[]) {
                   syserr("sendto");
               }
           }
-          else if(strncmp(simple_cmd.cmd, "GET", 3) == 0){
-              //TODO CONNECT ME
+          else if(memcmp(simple_cmd.cmd, GET, 10) == 0){
               simple_cmd.data[recv_len-18]='\0';
               string filename = simple_cmd.data;
               auto debug = Files;
               if(std::find(Files.begin(), Files.end(), fs::path{disc_folder + "/" + filename}) == Files.end()){
-                  //TODO powinien byc simple a nie complex
                   send_no_way(filename,simple_cmd.cmd_seq, sock, src_addr);
               }
               else {
-                  send_file(filename, sock, src_addr);
+                  send_file(filename, sock, src_addr, simple_cmd.cmd_seq);
               }
           }
-          else if(strncmp(simple_cmd.cmd, "LIST", 4) == 0){
-              cout << "Search..\n";
+          else if(memcmp(simple_cmd.cmd, LIST, 10) == 0){
               simple_cmd.data[recv_len-18] = '\0';
               send_file_list_packet(sock, src_addr, simple_cmd, Files);
           }
-          else if(strncmp(simple_cmd.cmd, "ADD", 10) == 0){
-              cout << "Add..\n";
+          else if(memcmp(simple_cmd.cmd, ADD, 10) == 0){
               abc->data[recv_len-26] = '\0';
               string fname (abc->data);
               int64_t file_size = be64toh(abc->param);
-              if ((strcmp(abc->data, "")==0 || fname.find('/')!= string::npos || file_size > size || (fs::exists(fs::path(disc_folder + "/" + abc->data))))){
-                  cout << "sending no way..\n";
+              if ((strcmp(abc->data, "")==0 || fname.find('/')!= string::npos || file_size > size
+              || (fs::exists(fs::path(disc_folder + "/" + abc->data))))){
                   send_no_way(fname, abc->cmd_seq, sock, src_addr);
               }
               else{
-                 // receive_file(fname, sock, src_addr);
                   auto t1 = std::async(std::launch::async, receive_file, file_size, fname, sock, src_addr);
                   filesInProgress.push_back(std::move(t1));
               }
           }
-          else if(strncmp(simple_cmd.cmd, "DEL", 10) == 0 ){
-              cout << "Delete..\n";
+          else if(memcmp(simple_cmd.cmd, DEL, 10) == 0 ){
               simple_cmd.data[recv_len-18] = '\0';
               //delete file
-              for (auto &f: Files){// TODO FIX
+              for (auto it = Files.begin(); it != Files.end(); ++it){
+                  auto f = *it;
                   if(strcmp(f.filename().c_str(), string(disc_folder + "/" + string(simple_cmd.data)).c_str()) == 0){
                       try {
                           fs::remove(f);
+                          Files.erase(it);
                           break;
                       }
                       catch(fs::filesystem_error &err){
@@ -443,6 +439,9 @@ int main(int argc, const char *argv[]) {
                       }
                   }
               }
+          }
+          else{
+              cout << "WRONG PACKET ERROR";
           }
   }while(xd);
 
