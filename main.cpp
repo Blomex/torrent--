@@ -52,11 +52,13 @@ promise_message send_file_to_socket(int msg_sock, string file){
             file_stream.read(buffer, 50000);
             ssize_t len = file_stream.gcount();
             if(write(msg_sock, buffer, len) != len){
+                shutdown(msg_sock, SHUT_WR);
                 return{false, ""};
             }
         }
     }
     else{
+        shutdown(msg_sock, SHUT_WR);
         return {false, ""};
     }
     file_stream.close();
@@ -355,7 +357,7 @@ promise_message send_add_and_wait_for_answer(int sock, string filename, struct s
         exit(1);
     }
     int received = recvfrom(sock, &answer, sizeof(answer), 0, (struct sockaddr*)&remote_address, &len);
-    if(memcmp(CAN_ADD, answer.cmd, 10) == 0){
+    if(memcmp(CAN_ADD, answer.cmd, 10) == 0 && answer.cmd_seq == add_packet.cmd_seq){
         //TODO polacz sie i wysylaj plik
         cout <<"CAN ADD received.. waiting for connection boys\n";
         complex_answer->data[received-26] = '\0';

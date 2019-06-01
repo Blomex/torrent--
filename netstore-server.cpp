@@ -15,7 +15,7 @@
 #include <future>
 #include <boost/log/trivial.hpp>
 #include <mutex>
-
+#include <signal.h>
 using namespace boost::program_options;
 namespace fs = boost::filesystem;
 using namespace boost::algorithm;
@@ -36,6 +36,30 @@ namespace {
 uint64_t size;
 struct timeval timeout;
 string addr, disc_folder;
+vector<std::thread> threads;
+}
+
+void catch_sig(int sig){
+    (void)sig;
+    cout <<"catched ctrl + c, closing..\n";
+    for(auto &t: threads){
+        t.join();
+    }
+}
+
+void set_sigint_catching(){
+    struct sigaction action;
+    sigset_t block_mask;
+    sigemptyset (&block_mask);
+    sigaddset(&block_mask, SIGINT);
+    action.sa_handler = catch_sig;
+    action.sa_mask = block_mask;
+    action.sa_flags = 0;
+    if (sigaction (SIGINT, &action, 0) == -1)
+        syserr("sigaction");
+    if (sigprocmask(SIG_BLOCK, &block_mask, 0) == -1)
+        syserr("sigprocmask block");
+
 }
 void on_timeout(int timeout){
     if(timeout> 300 || timeout <= 0){
@@ -178,7 +202,7 @@ int create_new_tcp_socket(uint16_t &port){
 //chyba dziala
 bool send_can_add(uint16_t port, struct sockaddr_in client, int main_sock, uint64_t cmd_seq){
     CMPLX_CMD complex;
-    complex.cmd_seq = cmd_seq;
+    complex.cmd_seq = htobe64(cmd_seq);
     set_cmd(complex.cmd, "CAN_ADD");
     complex.param = htobe64(uint64_t(port));
     ssize_t size_to_send = 26;
@@ -202,9 +226,6 @@ bool receive_file_from_socket(int tcp_socket, const char* file){
         ofs.write(buffer, length);
     }
     ofs.close();
-    if(close(sock)<0){
-        syserr("close");
-    }
     return length >= 0;
 }
 remote_file receive_file(uint64_t file_size, string file, int main_sock, struct sockaddr_in client, uint64_t cmd_seq){
@@ -235,27 +256,27 @@ void send_connect_me(string &file, uint16_t port, struct sockaddr_in client, int
 
 void send_file_to_socket(int msg_sock, string file){
     cout << file << "\n";
-    fs::path filePath(disc_folder + "/" + file);
-    std::ifstream file_stream{filePath.c_str(), std::ios::binary};
-    if(file_stream.is_open()){
-        char buffer[50000];
-        while(file_stream){
-            file_stream.read(buffer, 50000);
-            ssize_t len = file_stream.gcount();
-            if(write(msg_sock, buffer, len) != len){
-                syserr("partial write");
+        fs::path filePath(disc_folder + "/" + file);
+        std::ifstream file_stream{filePath.c_str(), std::ios::binary};
+        if (file_stream.is_open()) {
+            char buffer[50000];
+            while (file_stream) {
+                file_stream.read(buffer, 50000);
+                ssize_t len = file_stream.gcount();
+                if (write(msg_sock, buffer, len) != len) {
+                    syserr("partial write");
+                }
             }
+        } else {
+            std::cerr << "File opening error";
         }
-    }
-    else{
-        std::cerr << "File opening error";
-    }
-    file_stream.close();
-    cout << "Whole file sent\n";
-    shutdown(msg_sock, SHUT_WR);
+        file_stream.close();
+        cout << "Whole file sent\n";
+        shutdown(msg_sock, SHUT_WR);
 }
 
-void send_file(string &file, int main_sock, struct sockaddr_in client, uint64_t cmd_seq){
+//
+void send_file(string file, int main_sock, struct sockaddr_in client, uint64_t cmd_seq){
     uint16_t port;
     struct sockaddr_in private_client{};
     socklen_t client_address_len = sizeof(private_client);
@@ -265,7 +286,6 @@ void send_file(string &file, int main_sock, struct sockaddr_in client, uint64_t 
     cout <<"before accept\n";
     int msg_sock = accept(sock, (struct sockaddr*)&private_client,  &client_address_len);
     if(msg_sock<0){
-        perror("accept");
         close(msg_sock);
         close(sock);
         return;
@@ -273,9 +293,15 @@ void send_file(string &file, int main_sock, struct sockaddr_in client, uint64_t 
     cout <<"After accept\n";
     //we accepted so we can send now
     //send file
-    send_file_to_socket(msg_sock, file);
+    try {
+        send_file_to_socket(msg_sock, file);
+    }
+    catch(fs::filesystem_error &err){
+        return;
+    }
 }
 
+//sends simple packet with NO_WAY inside cmd
 void send_no_way(string &fname, uint64_t cmd_seq, int sock, struct sockaddr_in src_addr){
     SIMPL_CMD answer;
     set_cmd(answer.cmd, "NO_WAY");
@@ -288,19 +314,15 @@ void send_no_way(string &fname, uint64_t cmd_seq, int sock, struct sockaddr_in s
     }
 }
 
+//returns file descriptor to udp socket
 int create_new_udp_socket(uint16_t port, string &addr, struct ip_mreq &group){
     /* zmienne i struktury opisujące gniazda */
     int sock, optval;
     struct sockaddr_in local_address{};
-
-
-    /* zmienne obsługujące komunikację */
-
     /* otworzenie gniazda */
     sock = socket(AF_INET, SOCK_DGRAM, 0);
     if (sock < 0)
         syserr("socket");
-
     /*reuse addr*/
     {
         int reuse=1;
@@ -310,7 +332,6 @@ int create_new_udp_socket(uint16_t port, string &addr, struct ip_mreq &group){
             exit(1);
         }
     }
-
 /* podpięcie się pod lokalny adres i port */
     local_address.sin_family = AF_INET;
     local_address.sin_addr.s_addr = htonl(INADDR_ANY);
@@ -318,29 +339,23 @@ int create_new_udp_socket(uint16_t port, string &addr, struct ip_mreq &group){
     if (bind(sock, (struct sockaddr *)&local_address, sizeof local_address) < 0) {
         syserr("bind");
     }
-
     /* podpięcie się do grupy rozsyłania (ang. multicast) */
     group.imr_interface.s_addr = htonl(INADDR_ANY);
     if (inet_aton(addr.c_str(), &group.imr_multiaddr) == 0)
         syserr("inet_aton");
-
     if (setsockopt(sock, IPPROTO_IP, IP_ADD_MEMBERSHIP, (void*)&group, sizeof group) < 0)
         syserr("setsockopt");
-
 
     /* uaktywnienie rozgłaszania (ang. broadcast) */
     optval = 1;
     if (setsockopt(sock, SOL_SOCKET, SO_BROADCAST, (void*)&optval, sizeof optval) < 0)
         syserr("setsockopt broadcast");
-//    /* zablokowanie rozsyłania grupowego do siebie */
-//    optval = 0;
-//    if (setsockopt(sock, SOL_IP, IP_MULTICAST_LOOP, (void*)&optval, sizeof optval) < 0)
-//      syserr("setsockopt loop");
-return sock;
+    return sock;
 }
 
 
 int main(int argc, const char *argv[]) {
+    set_sigint_catching();
     struct ip_mreq group{};
     uint64_t space;
     socklen_t len = sizeof(struct sockaddr_in);
@@ -402,10 +417,10 @@ int main(int argc, const char *argv[]) {
               string filename = simple_cmd.data;
               auto debug = Files;
               if(std::find(Files.begin(), Files.end(), fs::path{disc_folder + "/" + filename}) == Files.end()){
-                  send_no_way(filename,simple_cmd.cmd_seq, sock, src_addr);
+                  send_no_way(filename, simple_cmd.cmd_seq, sock, src_addr);
               }
               else {
-                  send_file(filename, sock, src_addr, simple_cmd.cmd_seq);
+                  auto t1 = std::thread(send_file, filename, sock, src_addr, (uint64_t)simple_cmd.cmd_seq);
               }
           }
           else if(memcmp(simple_cmd.cmd, LIST, 10) == 0){
