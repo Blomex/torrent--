@@ -14,6 +14,7 @@
 #include <boost/algorithm/string.hpp>
 #include <future>
 #include <boost/log/trivial.hpp>
+#include <mutex>
 
 using namespace boost::program_options;
 namespace fs = boost::filesystem;
@@ -175,8 +176,9 @@ int create_new_tcp_socket(uint16_t &port){
     return sock;
 }
 //chyba dziala
-bool send_can_add(uint16_t port, struct sockaddr_in client, int main_sock){
+bool send_can_add(uint16_t port, struct sockaddr_in client, int main_sock, uint64_t cmd_seq){
     CMPLX_CMD complex;
+    complex.cmd_seq = cmd_seq;
     set_cmd(complex.cmd, "CAN_ADD");
     complex.param = htobe64(uint64_t(port));
     ssize_t size_to_send = 26;
@@ -205,13 +207,13 @@ bool receive_file_from_socket(int tcp_socket, const char* file){
     }
     return length >= 0;
 }
-remote_file receive_file(uint64_t file_size, string file, int main_sock, struct sockaddr_in client){
+remote_file receive_file(uint64_t file_size, string file, int main_sock, struct sockaddr_in client, uint64_t cmd_seq){
     uint16_t port;
     int sock = create_new_tcp_socket(port);
     if(sock < 0){
         return {false, file_size, file};
     }
-    if(!send_can_add(port, client, main_sock)){
+    if(!send_can_add(port, client, main_sock, cmd_seq)){
         return {false, file_size, file};
     }
     if(!receive_file_from_socket(sock, file.c_str())){
@@ -419,7 +421,8 @@ int main(int argc, const char *argv[]) {
                   send_no_way(fname, abc->cmd_seq, sock, src_addr);
               }
               else{
-                  auto t1 = std::async(std::launch::async, receive_file, file_size, fname, sock, src_addr);
+                  uint64_t cmd_seq = abc->cmd_seq;
+                  auto t1 = std::async(std::launch::async, receive_file, file_size, fname, sock, src_addr, cmd_seq);
                   filesInProgress.push_back(std::move(t1));
               }
           }
@@ -441,7 +444,7 @@ int main(int argc, const char *argv[]) {
               }
           }
           else{
-              cout << "WRONG PACKET ERROR";
+              cout << "[PCKG ERROR] Skipping invalid package from "<<inet_ntoa(src_addr.sin_addr) <<":"<<ntohs(src_addr.sin_port)<<".\n";
           }
   }while(xd);
 
