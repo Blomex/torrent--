@@ -1,7 +1,3 @@
-//
-// Created by Beniamin on 04.05.2019.
-//
-
 #ifndef PROJECT_ERR_H
 #define PROJECT_ERR_H
 
